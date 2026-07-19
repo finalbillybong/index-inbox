@@ -195,6 +195,20 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(spoken.json["group"],"KINGFISHER65")
         self.assertEqual(digits.json["group"],"KINGFISHER65")
 
+    def test_removing_group_preserves_entries(self):
+        webhook_headers={"X-Webhook-Secret": "test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Robin seventy two"},headers=webhook_headers)
+        entry=self.client.post("/webhook/index",json={"transcription":"Robin 72 inspection complete"},headers=webhook_headers)
+        login=self.login(); auth_headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        protected=self.client.delete("/api/groups/ROBIN72",headers=auth_headers)
+        self.assertEqual(protected.status_code,409)
+        removed=self.client.delete("/api/groups/ROBIN72?ungroup=true",headers=auth_headers)
+        self.assertEqual(removed.status_code,200)
+        self.assertEqual(removed.json["ungrouped"],1)
+        with self.module.app.app_context():
+            row=self.module.db().execute("SELECT group_name FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
+            self.assertIsNone(row["group_name"])
+
 
 if __name__ == "__main__":
     unittest.main()
