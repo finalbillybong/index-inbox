@@ -161,6 +161,54 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(rejected.status_code, 401)
         self.assertEqual(accepted.status_code, 201)
 
+    def test_explicit_group_creation_and_prefix_matching(self):
+        headers={"X-Webhook-Secret": "test-webhook-secret"}
+        created=self.client.post("/webhook/index",json={"transcription":"Create PW one five four."},headers=headers)
+        self.assertEqual(created.status_code,201)
+        self.assertTrue(created.json["groupCreated"])
+        first=self.client.post("/webhook/index",json={"transcription":"Note PW154 Steph height is 700"},headers=headers)
+        explicit=self.client.post("/webhook/index",json={"transcription":"Add to pw154: walkway length is 6154"},headers=headers)
+        mention=self.client.post("/webhook/index",json={"transcription":"Ask whether PW154 is complete"},headers=headers)
+        self.assertEqual(first.json["group"],"PW154")
+        self.assertEqual(explicit.json["group"],"PW154")
+        self.assertIsNone(mention.json["group"])
+        with self.module.app.app_context():
+            rows=self.module.db().execute("SELECT transcription,group_name FROM entries WHERE id IN (?,?) ORDER BY transcription",(first.json["id"],explicit.json["id"])).fetchall()
+        self.assertEqual([(row["transcription"],row["group_name"]) for row in rows],[('Steph height is 700','PW154'),('walkway length is 6154','PW154')])
+
+        spoken=self.client.post("/webhook/index",json={"transcription":"PW one five four another measurement is 22"},headers=headers)
+        self.assertEqual(spoken.json["group"],"PW154")
+
+    def test_group_command_is_idempotent(self):
+        headers={"X-Webhook-Secret": "test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create PW155"},headers=headers)
+        repeated=self.client.post("/webhook/index",json={"transcription":"create pw155"},headers=headers)
+        self.assertEqual(repeated.status_code,200)
+        self.assertFalse(repeated.json["groupCreated"])
+
+    def test_natural_spoken_number_group_aliases(self):
+        headers={"X-Webhook-Secret": "test-webhook-secret"}
+        created=self.client.post("/webhook/index",json={"transcription":"Create Kingfisher sixty 5."},headers=headers)
+        self.assertEqual(created.json["group"],"KINGFISHER65")
+        spoken=self.client.post("/webhook/index",json={"transcription":"Kingfisher sixty five step height is seven hundred millimetres."},headers=headers)
+        digits=self.client.post("/webhook/index",json={"transcription":"Kingfisher 65 walkway length is 6154"},headers=headers)
+        self.assertEqual(spoken.json["group"],"KINGFISHER65")
+        self.assertEqual(digits.json["group"],"KINGFISHER65")
+
+    def test_removing_group_preserves_entries(self):
+        webhook_headers={"X-Webhook-Secret": "test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Robin seventy two"},headers=webhook_headers)
+        entry=self.client.post("/webhook/index",json={"transcription":"Robin 72 inspection complete"},headers=webhook_headers)
+        login=self.login(); auth_headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        protected=self.client.delete("/api/groups/ROBIN72",headers=auth_headers)
+        self.assertEqual(protected.status_code,409)
+        removed=self.client.delete("/api/groups/ROBIN72?ungroup=true",headers=auth_headers)
+        self.assertEqual(removed.status_code,200)
+        self.assertEqual(removed.json["ungrouped"],1)
+        with self.module.app.app_context():
+            row=self.module.db().execute("SELECT group_name FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
+            self.assertIsNone(row["group_name"])
+
 
 if __name__ == "__main__":
     unittest.main()
