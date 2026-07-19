@@ -394,6 +394,43 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/groups/UNKNOWN999/timeline").status_code,404)
         self.assertEqual(self.client.get("/api/groups/UNKNOWN999/export/json").status_code,404)
 
+    def test_verified_backup_contains_database_audio_and_manifest(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        entry=self.client.post("/webhook/index",json={"transcription":"backup verification entry"},headers=webhook)
+        audio_name=f"{entry.json['id']}.webm"
+        with self.module.app.app_context():
+            (self.module.AUDIO_DIR/audio_name).write_bytes(b"backup-audio")
+            self.module.db().execute("UPDATE entries SET audio_path=?,audio_mime=? WHERE id=?",(audio_name,"audio/webm",entry.json["id"])); self.module.db().commit()
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        response=self.client.post("/api/backups",headers=headers)
+        self.assertEqual(response.status_code,201)
+        archive_path=self.module.BACKUP_DIR/response.json["backup"]["archive_name"]
+        verified=self.module.verify_backup_archive(archive_path)
+        self.assertTrue(verified["ok"])
+        self.assertGreaterEqual(verified["entries"],1)
+        self.assertGreaterEqual(verified["audioEntries"],1)
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertIn("manifest.json",archive.namelist())
+            self.assertIn("index-inbox.sqlite3",archive.namelist())
+            self.assertIn(f"audio/{audio_name}",archive.namelist())
+        latest=self.client.get("/api/backups/latest")
+        self.assertEqual(latest.status_code,200)
+        self.assertEqual(latest.data,archive_path.read_bytes())
+        latest.close()
+
+    def test_backup_failure_is_recorded_when_audio_is_missing(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        entry=self.client.post("/webhook/index",json={"transcription":"missing backup audio"},headers=webhook)
+        with self.module.app.app_context():
+            self.module.db().execute("UPDATE entries SET audio_path=?,audio_mime=? WHERE id=?",("missing-test.webm","audio/webm",entry.json["id"])); self.module.db().commit()
+        login=self.login(); response=self.client.post("/api/backups",headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]})
+        self.assertEqual(response.status_code,500)
+        with self.module.app.app_context():
+            run=self.module.db().execute("SELECT status,error FROM backup_runs ORDER BY requested_at DESC LIMIT 1").fetchone()
+            self.module.db().execute("UPDATE entries SET audio_path=NULL,audio_mime=NULL WHERE id=?",(entry.json["id"],)); self.module.db().commit()
+        self.assertEqual(run["status"],"failed")
+        self.assertIn("missing",run["error"].lower())
+
     def test_group_suggestion_requires_acceptance_and_does_not_learn_alias(self):
         webhook={"X-Webhook-Secret":"test-webhook-secret"}
         self.client.post("/webhook/index",json={"transcription":"Create Suggestion eighty four"},headers=webhook)

@@ -18,7 +18,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - Original webhook payload inspection
 - Audio playback, speed controls, downloads and retention cleanup
 - JSON, Markdown and ZIP/audio exports
-- Optional external backup hook
+- Verified restorable backups with manifests, status, retention, and optional external hook
 - Installable responsive PWA with manual text/audio capture
 - Cached recent entries and mobile share-target support
 
@@ -379,9 +379,46 @@ docker exec -it index-inbox flask groups delete-empty
 ```text
 index-inbox.sqlite3
 audio/
+backups/
 ```
 
-Back up the complete directory. SQLite WAL mode is enabled, so use a filesystem snapshot or briefly stop the container for a consistent file-level backup. The web interface can also export JSON, Markdown or a ZIP containing metadata and audio.
+Use **Storage, backup & export → Create verified backup** to create a consistent SQLite snapshot plus all referenced audio. The resulting ZIP is stored under `backups/`, includes a SHA-256 manifest, and can be downloaded from the same screen. Index Inbox retains the five newest local archives. Creation time, outcome, archive size, and errors are recorded in the database and Recent activity.
+
+Verify any archive without changing production data:
+
+```bash
+docker exec index-inbox flask backup verify /data/backups/ARCHIVE_NAME.zip
+```
+
+The verifier checks every file against the manifest, rejects missing or unexpected content, runs SQLite's integrity check against a temporary extraction, and confirms the entry/audio counts. A successful check does not prove that a separate off-server copy exists, so copy verified archives to another machine or backup target.
+
+Backup archives contain the complete database, including local account password hashes and session records, plus note payloads and audio. Treat them as sensitive and protect off-server copies with appropriate access controls and encryption.
+
+### Safe staging restore check
+
+Never test a restore over the production directory. On Unraid, use a new empty staging directory and bind the restored data to a disposable container on a different localhost-only port:
+
+```bash
+mkdir -p /mnt/user/appdata/index-restore-test
+unzip -q /mnt/user/appdata/index-local-login/data/backups/ARCHIVE_NAME.zip \
+  -d /mnt/user/appdata/index-restore-test
+
+RESTORE_IMAGE=$(docker inspect index-inbox --format '{{.Config.Image}}')
+docker run -d --name index-inbox-restore-check \
+  -p 127.0.0.1:5051:8080 \
+  --env-file /mnt/user/appdata/index-local-login/.env \
+  -e DATA_DIR=/data \
+  -v /mnt/user/appdata/index-restore-test:/data \
+  "$RESTORE_IMAGE"
+
+curl http://127.0.0.1:5051/health
+docker stop index-inbox-restore-check
+docker rm index-inbox-restore-check
+```
+
+The health request must return `{"ok":true}`. The staging container uses the restored database and audio only; it never mounts production `/data`. Use a fresh staging directory for each restore test.
+
+For a conventional file-level backup of live `/data`, remember that SQLite WAL mode is enabled: use a filesystem snapshot or briefly stop the container for consistency. The web interface can also export JSON, Markdown, or a non-restorable content ZIP.
 
 `BACKUP_HOOK_URL` can point to n8n or another automation endpoint. Index Inbox sends a small JSON event when the backup control is triggered; the receiving workflow is responsible for performing the backup.
 
