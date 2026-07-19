@@ -35,6 +35,19 @@ Index Inbox on your server
 
 The ring does not communicate with Index Inbox directly. The Pebble mobile app remains the bridge between the ring and your server.
 
+## Choosing authentication
+
+Index Inbox supports two authentication modes:
+
+| Mode | Choose it when | Tradeoff |
+| --- | --- | --- |
+| `firebase` | You want managed, low-maintenance email/password authentication and do not require the complete login path to remain local | Account identity and authentication depend on Google's Firebase service; notes, transcriptions and audio still remain on your server |
+| `local` | You want Index Inbox to authenticate users without contacting an external identity provider | You are responsible for securely operating, updating and recovering the self-hosted service |
+
+Firebase is the easier option for users who prefer a managed authentication service. Local authentication uses Argon2id password hashes, server-side sessions, CSRF protection, login throttling and a protected first-run setup flow, but its security also depends on keeping Index Inbox, Docker and the reverse proxy up to date.
+
+Existing installations continue to use Firebase when `AUTH_PROVIDER` is omitted. New installations should choose a mode explicitly.
+
 ## Requirements
 
 - Docker Engine with Docker Compose
