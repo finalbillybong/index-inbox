@@ -18,7 +18,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - Original webhook payload inspection
 - Audio playback, speed controls, downloads and retention cleanup
 - JSON, Markdown and ZIP/audio exports
-- Optional external backup hook
+- Verified restorable backups with manifests, status, retention, and optional external hook
 - Installable responsive PWA with manual text/audio capture
 - Cached recent entries and mobile share-target support
 
