@@ -436,6 +436,20 @@ def delete_group(name):
     db().execute("UPDATE entries SET group_name=NULL WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_groups WHERE name=?",(name,)); db().commit()
     log_activity("info","group",f"Removed group {row['display_name']}; preserved {count} entries",row["display_name"]); return jsonify(ok=True,ungrouped=count)
 
+def find_group(name):
+    canonical=normalized_group_name(name)
+    return db().execute("SELECT display_name AS name,created_at,archived FROM note_groups WHERE name=?",(canonical,)).fetchone() if canonical else None
+
+def group_entries(name):
+    return [dict(row) for row in db().execute("SELECT * FROM entries WHERE group_name=? ORDER BY coalesce(recorded_at,created_at),created_at,id",(name,))]
+
+@app.get("/api/groups/<name>/timeline")
+@api_auth
+def group_timeline(name):
+    group=find_group(name)
+    if not group:return jsonify(error="Group not found"),404
+    return jsonify(group=dict(group),items=group_entries(group["name"]))
+
 @app.get("/api/entries")
 @api_auth
 def entries():
@@ -538,22 +552,34 @@ def status():
 
 def export_rows(): return [dict(r) for r in db().execute("SELECT * FROM entries ORDER BY created_at DESC")]
 
+def markdown_export(rows, title=None):
+    heading=f"# {title}\n\n" if title else ""
+    return heading+"\n\n".join(f"## {r['recorded_at'] or r['created_at']}\n\n{r['transcription']}\n\nCategory: {r['category']}\n\nTags: {r['tags']}" for r in rows)
+
+def export_response(fmt, rows, basename, title=None):
+    if fmt=="json":return Response(json.dumps(rows,indent=2,ensure_ascii=False),headers={"Content-Disposition":f"attachment; filename={basename}.json"},mimetype="application/json")
+    if fmt=="markdown":return Response(markdown_export(rows,title),headers={"Content-Disposition":f"attachment; filename={basename}.md"},mimetype="text/markdown")
+    if fmt=="zip":
+        out=io.BytesIO()
+        with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("entries.json",json.dumps(rows,indent=2,ensure_ascii=False)); archive.writestr("notes.md",markdown_export(rows,title))
+            for row in rows:
+                if row["audio_path"] and (AUDIO_DIR/row["audio_path"]).exists():archive.write(AUDIO_DIR/row["audio_path"],f"audio/{row['audio_path']}")
+        out.seek(0);return send_file(out,mimetype="application/zip",as_attachment=True,download_name=f"{basename}.zip")
+    return jsonify(error="Use json, markdown, or zip"),400
+
 @app.get("/api/export/<fmt>")
 @api_auth
 def export(fmt):
-    rows=export_rows()
-    if fmt=="json": return Response(json.dumps(rows,indent=2,ensure_ascii=False),headers={"Content-Disposition":"attachment; filename=index-inbox.json"},mimetype="application/json")
-    if fmt=="markdown":
-        text="\n\n".join(f"## {r['recorded_at'] or r['created_at']}\n\n{r['transcription']}\n\nTags: {r['tags']}" for r in rows)
-        return Response(text,headers={"Content-Disposition":"attachment; filename=index-inbox.md"},mimetype="text/markdown")
-    if fmt=="zip":
-        out=io.BytesIO()
-        with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
-            z.writestr("entries.json",json.dumps(rows,indent=2,ensure_ascii=False))
-            for r in rows:
-                if r["audio_path"] and (AUDIO_DIR/r["audio_path"]).exists():z.write(AUDIO_DIR/r["audio_path"],f"audio/{r['audio_path']}")
-        out.seek(0); return send_file(out,mimetype="application/zip",as_attachment=True,download_name="index-inbox.zip")
-    return jsonify(error="Use json, markdown, or zip"),400
+    return export_response(fmt,export_rows(),"index-inbox")
+
+@app.get("/api/groups/<name>/export/<fmt>")
+@api_auth
+def export_group(name,fmt):
+    group=find_group(name)
+    if not group:return jsonify(error="Group not found"),404
+    canonical=group["name"]
+    return export_response(fmt,group_entries(canonical),f"index-inbox-{canonical.lower()}",canonical)
 
 @app.post("/api/maintenance/retention")
 @api_auth
