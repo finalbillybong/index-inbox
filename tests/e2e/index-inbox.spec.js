@@ -30,7 +30,7 @@ test.describe.serial('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v0.19');
+    await expect(page.locator('.version')).toHaveText('v1.0.0');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
@@ -88,5 +88,17 @@ test.describe.serial('Index Inbox browser flows', () => {
     await expect(page.locator('#info-dialog')).toBeVisible();
     await expect(page.locator('#info-dialog')).toHaveCSS('width', '390px');
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' }).getByRole('button', { name: 'Timeline' })).toBeVisible();
+  });
+
+  test('mobile header and storage actions do not overlap', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login(page);
+    await expect(page.locator('header')).toHaveCSS('min-height', '64px');
+    await page.locator('#status-open').click();
+    await expect(page.locator('.storage-status')).toBeVisible();
+    const buttons = page.locator('.storage-status .modal-actions button');
+    await expect(buttons).toHaveCount(8);
+    const boxes = await buttons.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect()).map(({ top, bottom, left, right }) => ({ top, bottom, left, right })));
+    for (let i = 1; i < boxes.length; i += 1) expect(boxes[i].top).toBeGreaterThanOrEqual(boxes[i - 1].bottom);
   });
 });
