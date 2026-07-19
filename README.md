@@ -6,7 +6,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 
 - Flexible JSON and multipart webhook ingestion
 - Header-based webhook authentication
-- Firebase Email/Password authentication with an email allowlist
+- Choice of fully local authentication or Firebase Email/Password authentication
 - SQLite metadata and local audio storage
 - Retry deduplication and delivery activity history
 - Editable transcriptions, tags, categories, starring and archiving
@@ -35,12 +35,24 @@ Index Inbox on your server
 
 The ring does not communicate with Index Inbox directly. The Pebble mobile app remains the bridge between the ring and your server.
 
+## Choosing authentication
+
+Index Inbox supports two authentication modes:
+
+| Mode | Choose it when | Tradeoff |
+| --- | --- | --- |
+| `firebase` | You want managed, low-maintenance email/password authentication and do not require the complete login path to remain local | Account identity and authentication depend on Google's Firebase service; notes, transcriptions and audio still remain on your server |
+| `local` | You want Index Inbox to authenticate users without contacting an external identity provider | You are responsible for securely operating, updating and recovering the self-hosted service |
+
+Firebase is the easier option for users who prefer a managed authentication service. Local authentication uses Argon2id password hashes, server-side sessions, CSRF protection, login throttling and a protected first-run setup flow, but its security also depends on keeping Index Inbox, Docker and the reverse proxy up to date.
+
+Existing installations continue to use Firebase when `AUTH_PROVIDER` is omitted. New installations should choose a mode explicitly.
+
 ## Requirements
 
 - Docker Engine with Docker Compose
 - A public HTTPS hostname through a reverse proxy or secure tunnel
-- A Firebase project with Email/Password authentication enabled
-- A Firebase service-account JSON file for server-side token verification
+- For Firebase mode only: a Firebase project and service-account JSON file
 
 ## Quick start
 
@@ -58,7 +70,7 @@ The ring does not communicate with Index Inbox directly. The Pebble mobile app r
    openssl rand -hex 32
    ```
 
-3. Put the generated value in `WEBHOOK_SECRET` and configure the remaining variables.
+3. Put the generated value in `WEBHOOK_SECRET`, choose `AUTH_PROVIDER=local` or `AUTH_PROVIDER=firebase`, and configure the remaining variables.
 
 4. Start the service:
 
@@ -81,16 +93,72 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 | Variable | Required | Description |
 | --- | --- | --- |
 | `WEBHOOK_SECRET` | Yes | Random secret used to authenticate incoming Index webhooks |
-| `FIREBASE_PROJECT_ID` | Yes | Firebase project identifier |
-| `FIREBASE_API_KEY` | Yes | Firebase web application API key |
-| `FIREBASE_AUTH_DOMAIN` | Yes | Usually `PROJECT_ID.firebaseapp.com` |
+| `AUTH_PROVIDER` | Yes | `local` for self-hosted accounts or `firebase` for Firebase Authentication |
+| `AUTH_ALLOWED_ORIGINS` | Local | Comma-separated allowed browser origins, including scheme and port |
+| `AUTH_EXPECTED_ORIGIN` | Local | Deprecated single-origin setting retained for compatibility |
+| `AUTH_COOKIE_SECURE` | Local | Keep `true` in production; set `false` only for localhost HTTP testing |
+| `AUTH_SESSION_DAYS` | Local | Absolute local-session lifetime, default 30 days |
+| `AUTH_IDLE_DAYS` | Local | Local-session idle timeout, default 7 days |
+| `LOCAL_SETUP_TOKEN` | Local setup | One-time secret required to create the first owner through the browser |
+| `FIREBASE_PROJECT_ID` | Firebase | Firebase project identifier |
+| `FIREBASE_API_KEY` | Firebase | Firebase web application API key |
+| `FIREBASE_AUTH_DOMAIN` | Firebase | Usually `PROJECT_ID.firebaseapp.com` |
 | `ALLOWED_EMAILS` | Recommended | Comma-separated lowercase email allowlist |
 | `REQUIRE_VERIFIED_EMAIL` | Recommended | Require Firebase's `email_verified` claim |
 | `INDEX_DATA_PATH` | Yes | Persistent host directory for SQLite and audio |
-| `FIREBASE_CREDENTIALS_PATH` | Yes | Host path to the service-account JSON file |
+| `FIREBASE_CREDENTIALS_PATH` | Firebase | Host path to the service-account JSON file |
 | `BACKUP_HOOK_URL` | No | Automation endpoint called from the backup control |
 
 `FIREBASE_API_KEY` is browser configuration and is not treated as a server secret. The service-account JSON is sensitive and must never be committed, placed in the web root or included in a container image.
+
+## Local authentication setup
+
+Local mode keeps account credentials and sessions in the same SQLite database as Index Inbox. It does not load Firebase or contact Google. There is no public registration or web-based password reset.
+
+1. Generate independent secrets for the webhook and first-run setup:
+
+   ```bash
+   openssl rand -hex 32
+   openssl rand -hex 32
+   ```
+
+2. Create `.env` beside `compose.yaml`. A local-plus-Cloudflare example is:
+
+   ```dotenv
+   INDEX_DATA_PATH=/absolute/host/path/to/index-inbox/data
+   WEBHOOK_SECRET=first-generated-value
+   AUTH_PROVIDER=local
+   AUTH_ALLOWED_ORIGINS=https://index.example.com,http://192.168.1.10:5050
+   AUTH_COOKIE_SECURE=true
+   LOCAL_SETUP_TOKEN=second-generated-value
+   ```
+
+   Origins are matched exactly. Use the address shown by `location.origin` in the browser, including the scheme and any non-default port.
+
+3. Build and start the container:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+   Put the generated value in `LOCAL_SETUP_TOKEN`, open Index Inbox, and use it on the first-run screen to create the owner account. Web setup is permanently unavailable after the first local user exists. Remove `LOCAL_SETUP_TOKEN` from `.env` afterward and recreate the container with `docker compose up -d --force-recreate`.
+
+   Alternatively, leave `LOCAL_SETUP_TOKEN` empty and create the first account interactively with `docker exec -it index-inbox flask auth create-user`. Passwords must be at least 12 characters and are hashed with Argon2id. Passwords are never supplied through environment variables or command arguments.
+
+4. To change a password or invalidate signed-in devices:
+
+   ```bash
+   docker exec -it index-inbox flask auth change-password
+   docker exec -it index-inbox flask auth revoke-sessions
+   docker exec index-inbox flask auth list-users
+   docker exec -it index-inbox flask auth disable-user
+   ```
+
+Changing a password revokes every session for that account. Local login is limited after repeated failures. The browser uses a Secure, HttpOnly, SameSite cookie plus a separate CSRF token for changes.
+
+`AUTH_ALLOWED_ORIGINS` accepts multiple exact origins separated by commas, for example a Cloudflare Tunnel URL and a LAN address. Include the scheme and non-default port, and omit paths and trailing slashes.
+
+Secure cookies require HTTPS. If the Cloudflare URL uses HTTPS but the LAN address uses plain HTTP, `AUTH_COOKIE_SECURE=true` protects the remote session but the browser will not authenticate over the LAN HTTP address. Prefer HTTPS on both routes. Use `AUTH_COOKIE_SECURE=false` only for isolated HTTP testing; it permits the local-auth cookie to travel without transport encryption.
 
 ## Firebase setup
 
@@ -103,6 +171,8 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 7. Ensure container UID `1000` can read the credentials file and write to `INDEX_DATA_PATH`.
 
 Keep `ALLOWED_EMAILS` populated. Firebase's public client API can create accounts even though Index Inbox does not expose a registration screen; the allowlist is the application authorization boundary.
+
+Set `AUTH_PROVIDER=firebase`. For backward compatibility, installations that do not define `AUTH_PROVIDER` also use Firebase. Only the selected authentication provider is initialized; local mode does not load Firebase browser scripts.
 
 To administratively mark an existing Firebase account verified from the running container:
 
@@ -194,13 +264,32 @@ docker logs --tail 100 index-inbox
 
 If startup reports `Permission denied: '/data/audio'`, make `INDEX_DATA_PATH` writable by UID `1000`.
 
+If Compose reports `invalid spec: :/data`, ensure `.env` is beside `compose.yaml` and contains an absolute `INDEX_DATA_PATH`. Confirm what Compose loaded with:
+
+```bash
+docker compose config --environment | grep INDEX_DATA_PATH
+```
+
+If local setup unexpectedly shows Firebase login, verify both Compose and the running container:
+
+```bash
+docker compose config --environment | grep AUTH_PROVIDER
+docker exec index-inbox printenv AUTH_PROVIDER AUTH_ALLOWED_ORIGINS
+curl -i http://127.0.0.1:5050/auth/session
+```
+
+An empty local installation returns `401` with `setupRequired: true`. If setup reports `Invalid request origin`, compare `AUTH_ALLOWED_ORIGINS` with the exact address shown by `location.origin`; a hostname, IP address, scheme or port difference represents a different origin.
+
+Rebuilding or recreating a container does not remove accounts or sessions from `INDEX_DATA_PATH`. Use `flask auth revoke-sessions` to log out existing devices, or point `INDEX_DATA_PATH` at a new empty directory when testing the complete first-run flow. Stop the container before manually moving SQLite files.
+
 If the web interface appears stale after an update, confirm the version shown in its header, close all open tabs and clear the site's cached data once. Index Inbox uses a service worker for PWA and offline support.
 
 ## Security notes
 
 - Use HTTPS for all public access.
 - Keep the webhook secret in a custom header.
-- Keep the Firebase email allowlist enabled.
+- Keep the Firebase email allowlist enabled when using Firebase mode.
+- Keep `AUTH_COOKIE_SECURE=true` and configure exact `AUTH_ALLOWED_ORIGINS` in local mode.
 - Never commit `.env` or service-account JSON files.
 - Restrict filesystem access to the persistent data and credentials paths.
 - Disable cloud transcription or backup in the Pebble app if an entirely local processing path is required.

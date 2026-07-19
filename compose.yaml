@@ -8,6 +8,13 @@ services:
     environment:
       DATA_DIR: /data
       WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      AUTH_PROVIDER: ${AUTH_PROVIDER:-firebase}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+      AUTH_EXPECTED_ORIGIN: ${AUTH_EXPECTED_ORIGIN:-}
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-}
+      LOCAL_SETUP_TOKEN: ${LOCAL_SETUP_TOKEN:-}
+      AUTH_SESSION_DAYS: ${AUTH_SESSION_DAYS:-30}
+      AUTH_IDLE_DAYS: ${AUTH_IDLE_DAYS:-7}
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
       FIREBASE_API_KEY: ${FIREBASE_API_KEY}
       FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN}
@@ -19,4 +26,4 @@ services:
       BACKUP_HOOK_URL: ${BACKUP_HOOK_URL:-}
     volumes:
       - ${INDEX_DATA_PATH}:/data
-      - ${FIREBASE_CREDENTIALS_PATH}:/run/secrets/firebase-service-account.json:ro
+      - ${FIREBASE_CREDENTIALS_PATH:-/dev/null}:/run/secrets/firebase-service-account.json:ro
