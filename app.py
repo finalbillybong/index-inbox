@@ -235,16 +235,38 @@ def normalized_group_name(value):
     value=str(value).strip()
     return value.upper() if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}",value) else None
 
+DIGIT_WORDS={"zero":"0","oh":"0","one":"1","two":"2","three":"3","four":"4","five":"5","six":"6","seven":"7","eight":"8","nine":"9"}
+
+def canonical_group_phrase(value):
+    value=str(value).strip().rstrip(".!").strip(); direct=normalized_group_name(value)
+    if direct:return direct
+    tokens=value.lower().split(); number_at=next((i for i,token in enumerate(tokens) if token in DIGIT_WORDS or token.isdigit()),None)
+    if number_at is None or number_at==0:return None
+    prefix=tokens[:number_at]; numbers=tokens[number_at:]
+    if not all(token.isalpha() and token not in DIGIT_WORDS for token in prefix):return None
+    if not all(token in DIGIT_WORDS or token.isdigit() for token in numbers):return None
+    return normalized_group_name("".join(prefix)+"".join(DIGIT_WORDS.get(token,token) for token in numbers))
+
 def create_group_command(text):
-    match=re.fullmatch(r"\s*create\s+([A-Za-z0-9][A-Za-z0-9_-]{0,31})\s*[.!]?\s*",text,re.IGNORECASE)
-    return normalized_group_name(match.group(1)) if match else None
+    match=re.fullmatch(r"\s*create\s+(.+?)\s*",text,re.IGNORECASE)
+    return canonical_group_phrase(match.group(1)) if match else None
+
+def group_spoken_aliases(name):
+    match=re.fullmatch(r"([A-Za-z_-]+)(\d+)",name)
+    if not match:return []
+    prefix=match.group(1); spoken=" ".join(next(word for word,digit in DIGIT_WORDS.items() if digit==value and word!="oh") for value in match.group(2))
+    return [f"{prefix} {spoken}",f"{' '.join(prefix)} {spoken}"]
 
 def match_note_group(text):
-    explicit=re.match(r"^\s*add\s+to\s+([A-Za-z0-9][A-Za-z0-9_-]{0,31})(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.IGNORECASE|re.DOTALL)
-    prefix=explicit or re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.DOTALL)
-    if not prefix:return None,text
-    name=normalized_group_name(prefix.group(1)); row=db().execute("SELECT display_name FROM note_groups WHERE name=? AND archived=0",(name,)).fetchone()
-    return (row["display_name"],prefix.group(2).strip()) if row else (None,text)
+    candidate=re.sub(r"^\s*add\s+to\s+","",text,count=1,flags=re.IGNORECASE)
+    groups=db().execute("SELECT display_name FROM note_groups WHERE archived=0 ORDER BY length(display_name) DESC").fetchall()
+    for row in groups:
+        aliases=[row["display_name"],*group_spoken_aliases(row["display_name"])]
+        for alias in aliases:
+            pattern=r"^\s*"+r"\s+".join(re.escape(part) for part in alias.split())+r"(?:\s*[:.,-]\s*|\s+)(.+)$"
+            match=re.match(pattern,candidate,re.IGNORECASE|re.DOTALL)
+            if match:return row["display_name"],match.group(1).strip()
+    return None,text
 
 def payload_from_request():
     payload = request.get_json(silent=True) or request.form.to_dict(flat=True)

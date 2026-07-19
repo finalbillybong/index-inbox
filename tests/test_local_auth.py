@@ -163,7 +163,7 @@ class LocalAuthTests(unittest.TestCase):
 
     def test_explicit_group_creation_and_prefix_matching(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}
-        created=self.client.post("/webhook/index",json={"transcription":"Create PW154"},headers=headers)
+        created=self.client.post("/webhook/index",json={"transcription":"Create PW one five four."},headers=headers)
         self.assertEqual(created.status_code,201)
         self.assertTrue(created.json["groupCreated"])
         first=self.client.post("/webhook/index",json={"transcription":"Note PW154 Steph height is 700"},headers=headers)
@@ -174,7 +174,10 @@ class LocalAuthTests(unittest.TestCase):
         self.assertIsNone(mention.json["group"])
         with self.module.app.app_context():
             rows=self.module.db().execute("SELECT transcription,group_name FROM entries WHERE id IN (?,?) ORDER BY transcription",(first.json["id"],explicit.json["id"])).fetchall()
-            self.assertEqual([(row["transcription"],row["group_name"]) for row in rows],[('Steph height is 700','PW154'),('walkway length is 6154','PW154')])
+        self.assertEqual([(row["transcription"],row["group_name"]) for row in rows],[('Steph height is 700','PW154'),('walkway length is 6154','PW154')])
+
+        spoken=self.client.post("/webhook/index",json={"transcription":"PW one five four another measurement is 22"},headers=headers)
+        self.assertEqual(spoken.json["group"],"PW154")
 
     def test_group_command_is_idempotent(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}
