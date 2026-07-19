@@ -266,6 +266,8 @@ Create a group explicitly with a recording containing only:
 Create PW154
 ```
 
+Spoken-digit transcription is also recognized, so `Create PW one five four` creates the canonical group `PW154`. Later captures beginning `PW one five four …` match the same group.
+
 After that, a recording whose text begins with the group name is added to it:
 
 ```text
