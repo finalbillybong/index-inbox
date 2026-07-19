@@ -453,6 +453,10 @@ npm run test:e2e
 
 The browser flow covers first-run setup, subsequent login, live webhook refresh, note groups, suggestion acceptance, rename/archive/reopen behavior, timeline saving, group downloads, and a narrow mobile viewport. Pull requests and pushes to `main` run the Chromium suite in GitHub Actions; failed runs upload the Playwright HTML report, traces, and screenshots for seven days.
 
+## Release validation
+
+Production releases are promoted only after the release candidate passes the automated suite and the Unraid deployment, access, regression, backup, restore, and rollback checks in [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md). Keep the existing `INDEX_DATA_PATH` unchanged while deploying or rolling back application code.
+
 ## Troubleshooting
 
 Check container health and logs:
