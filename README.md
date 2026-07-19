@@ -103,6 +103,8 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 | `AUTH_COOKIE_SECURE` | Local | Keep `true` in production; set `false` only for localhost HTTP testing |
 | `AUTH_SESSION_DAYS` | Local | Absolute local-session lifetime, default 30 days |
 | `AUTH_IDLE_DAYS` | Local | Local-session idle timeout, default 7 days |
+| `TRUSTED_PROXY_HOPS` | No | Number of trusted forwarding hops; defaults to `0`, which ignores forwarded client-IP headers |
+| `TRUSTED_PROXY_CIDRS` | Proxy trust | Comma-separated IP networks allowed to supply forwarded client addresses |
 | `LOCAL_SETUP_TOKEN` | Local setup | One-time secret required to create the first owner through the browser |
 | `FIREBASE_PROJECT_ID` | Firebase | Firebase project identifier |
 | `FIREBASE_API_KEY` | Firebase | Firebase web application API key |
@@ -180,6 +182,29 @@ AUTH_PROVIDER=local
 AUTH_COOKIE_SECURE=true
 AUTH_ALLOWED_ORIGINS=https://index.example.com
 ```
+
+### Trusted proxy client addresses
+
+By default, Index Inbox ignores `CF-Connecting-IP` and `X-Forwarded-For`. Login throttling therefore uses the direct network peer, which is safe but may treat every Cloudflare Tunnel visitor as the same address.
+
+**This configuration is optional.** Most single-user installations should leave both variables absent. Docker Compose supplies `TRUSTED_PROXY_HOPS=0`, so no `.env` change is required and forwarding headers remain safely disabled.
+
+Only enable proxy trust when the application port can be reached exclusively through a known reverse proxy or tunnel peer. Configure both the number of forwarding hops and the narrowest peer address or network that contains that proxy:
+
+```dotenv
+TRUSTED_PROXY_HOPS=1
+TRUSTED_PROXY_CIDRS=172.18.0.4/32
+```
+
+With one trusted hop, Index Inbox prefers Cloudflare's `CF-Connecting-IP` value and otherwise uses the rightmost `X-Forwarded-For` address. With multiple hops it selects the configured position from the right of `X-Forwarded-For`. Forwarding headers are ignored whenever the direct peer is outside `TRUSTED_PROXY_CIDRS`, malformed, or shorter than the configured chain.
+
+To identify the direct peer safely, leave proxy trust disabled, make one deliberate failed login through the tunnel, and inspect the most recent attempt:
+
+```bash
+docker exec index-inbox flask auth list-attempts
+```
+
+Each record retains both `client=` (the address used for throttling) and `peer=` (the direct connection). After configuring trust and recreating the container, repeat the check: `client=` should show the public visitor address while `peer=` should still show the trusted tunnel or proxy address. Do not trust a broad private network merely for convenience; any client able to connect from that network could otherwise supply a forged forwarding header.
 
 Apply environment-only changes without rebuilding the image:
 
