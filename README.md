@@ -102,19 +102,29 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 
 Local mode keeps account credentials and sessions in the same SQLite database as Index Inbox. It does not load Firebase or contact Google. There is no public registration or web-based password reset.
 
-1. Set these values in `.env`:
-
-   ```dotenv
-   AUTH_PROVIDER=local
-   AUTH_ALLOWED_ORIGINS=https://index.example.com,http://192.168.1.10:5050
-   AUTH_COOKIE_SECURE=true
-   LOCAL_SETUP_TOKEN=generate-a-separate-random-value
-   ```
-
-2. Generate a separate setup token, build and start the container:
+1. Generate independent secrets for the webhook and first-run setup:
 
    ```bash
    openssl rand -hex 32
+   openssl rand -hex 32
+   ```
+
+2. Create `.env` beside `compose.yaml`. A local-plus-Cloudflare example is:
+
+   ```dotenv
+   INDEX_DATA_PATH=/absolute/host/path/to/index-inbox/data
+   WEBHOOK_SECRET=first-generated-value
+   AUTH_PROVIDER=local
+   AUTH_ALLOWED_ORIGINS=https://index.example.com,http://192.168.1.10:5050
+   AUTH_COOKIE_SECURE=true
+   LOCAL_SETUP_TOKEN=second-generated-value
+   ```
+
+   Origins are matched exactly. Use the address shown by `location.origin` in the browser, including the scheme and any non-default port.
+
+3. Build and start the container:
+
+   ```bash
    docker compose up -d --build
    ```
 
@@ -122,7 +132,7 @@ Local mode keeps account credentials and sessions in the same SQLite database as
 
    Alternatively, leave `LOCAL_SETUP_TOKEN` empty and create the first account interactively with `docker exec -it index-inbox flask auth create-user`. Passwords must be at least 12 characters and are hashed with Argon2id. Passwords are never supplied through environment variables or command arguments.
 
-3. To change a password or invalidate signed-in devices:
+4. To change a password or invalidate signed-in devices:
 
    ```bash
    docker exec -it index-inbox flask auth change-password
@@ -240,6 +250,24 @@ docker logs --tail 100 index-inbox
 ```
 
 If startup reports `Permission denied: '/data/audio'`, make `INDEX_DATA_PATH` writable by UID `1000`.
+
+If Compose reports `invalid spec: :/data`, ensure `.env` is beside `compose.yaml` and contains an absolute `INDEX_DATA_PATH`. Confirm what Compose loaded with:
+
+```bash
+docker compose config --environment | grep INDEX_DATA_PATH
+```
+
+If local setup unexpectedly shows Firebase login, verify both Compose and the running container:
+
+```bash
+docker compose config --environment | grep AUTH_PROVIDER
+docker exec index-inbox printenv AUTH_PROVIDER AUTH_ALLOWED_ORIGINS
+curl -i http://127.0.0.1:5050/auth/session
+```
+
+An empty local installation returns `401` with `setupRequired: true`. If setup reports `Invalid request origin`, compare `AUTH_ALLOWED_ORIGINS` with the exact address shown by `location.origin`; a hostname, IP address, scheme or port difference represents a different origin.
+
+Rebuilding or recreating a container does not remove accounts or sessions from `INDEX_DATA_PATH`. Use `flask auth revoke-sessions` to log out existing devices, or point `INDEX_DATA_PATH` at a new empty directory when testing the complete first-run flow. Stop the container before manually moving SQLite files.
 
 If the web interface appears stale after an update, confirm the version shown in its header, close all open tabs and clear the site's cached data once. Index Inbox uses a service worker for PWA and offline support.
 
