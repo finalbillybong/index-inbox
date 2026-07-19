@@ -10,6 +10,8 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - SQLite metadata and local audio storage
 - Retry deduplication and delivery activity history
 - Editable transcriptions, tags, categories, starring and archiving
+- Explicit voice-created note groups with combined presentation
+- Automatic background refresh for new webhook captures
 - Search, filters, pagination and bulk actions
 - Original webhook payload inspection
 - Audio playback, speed controls, downloads and retention cleanup
@@ -255,6 +257,31 @@ Note: the blue filament worked best
 ```
 
 `Todo`, `to-do` and `reminder` map to `task`. Recordings without a recognized prefix remain `note`.
+
+## Voice note groups
+
+Create a group explicitly with a recording containing only:
+
+```text
+Create PW154
+```
+
+After that, a recording whose text begins with the group name is added to it:
+
+```text
+PW154 Steph height is 700
+PW154 walkway length is 6154
+```
+
+The more conversational explicit form also works:
+
+```text
+Add to PW154: walkway width is 900
+```
+
+Group names are case-insensitive and may contain letters, numbers, hyphens and underscores. They must be 1–32 characters and are displayed in uppercase. Only the first word is matched against an existing group. A sentence such as `Ask whether PW154 is complete` therefore remains a standalone note.
+
+Each addition remains an independent stored entry with its original timestamp, audio and webhook payload, while the inbox presents entries from the same group together. Use the group filter to focus on one group. New webhook captures and groups appear automatically within about five seconds; automatic refresh pauses while a note is being edited or a dialog is open.
 
 ## Data and backups
 

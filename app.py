@@ -62,10 +62,12 @@ def init_db():
       CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, attempted_at TEXT NOT NULL,
         username TEXT NOT NULL, source_ip TEXT NOT NULL, successful INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username,source_ip,attempted_at);
+      CREATE TABLE IF NOT EXISTS note_groups (name TEXT PRIMARY KEY COLLATE NOCASE, display_name TEXT NOT NULL,
+        created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
     """)
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
-      "archived":"INTEGER NOT NULL DEFAULT 0", "source_key":"TEXT"}
+      "archived":"INTEGER NOT NULL DEFAULT 0", "source_key":"TEXT", "group_name":"TEXT"}
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source_key ON entries(source_key) WHERE source_key IS NOT NULL")
@@ -229,6 +231,21 @@ def voice_category(text):
     match=re.match(r"^\s*(note|idea|task|todo|to-do|reminder|question)(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.IGNORECASE|re.DOTALL)
     return (aliases[match.group(1).lower()],match.group(2).strip()) if match else ("note",text)
 
+def normalized_group_name(value):
+    value=str(value).strip()
+    return value.upper() if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}",value) else None
+
+def create_group_command(text):
+    match=re.fullmatch(r"\s*create\s+([A-Za-z0-9][A-Za-z0-9_-]{0,31})\s*[.!]?\s*",text,re.IGNORECASE)
+    return normalized_group_name(match.group(1)) if match else None
+
+def match_note_group(text):
+    explicit=re.match(r"^\s*add\s+to\s+([A-Za-z0-9][A-Za-z0-9_-]{0,31})(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.IGNORECASE|re.DOTALL)
+    prefix=explicit or re.match(r"^\s*([A-Za-z0-9][A-Za-z0-9_-]{0,31})(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.DOTALL)
+    if not prefix:return None,text
+    name=normalized_group_name(prefix.group(1)); row=db().execute("SELECT display_name FROM note_groups WHERE name=? AND archived=0",(name,)).fetchone()
+    return (row["display_name"],prefix.group(2).strip()) if row else (None,text)
+
 def payload_from_request():
     payload = request.get_json(silent=True) or request.form.to_dict(flat=True)
     if not payload and request.data:
@@ -244,17 +261,24 @@ def store_entry(payload, upload=None, source="ring"):
     source_key = hashlib.sha256(f"{source}:{basis}".encode()).hexdigest() if basis else None
     if source_key:
         existing = db().execute("SELECT id FROM entries WHERE source_key=?",(source_key,)).fetchone()
-        if existing: log_activity("info","duplicate","Duplicate webhook ignored",existing["id"]); return existing["id"], False
-    audio_path=audio_mime=None
-    if upload and upload.filename:
-        suffix=Path(upload.filename).suffix.lower()[:10] or ".bin"; audio_path=f"{entry_id}{suffix}"; audio_mime=upload.mimetype or "application/octet-stream"; upload.save(AUDIO_DIR/audio_path)
+        if existing: log_activity("info","duplicate","Duplicate webhook ignored",existing["id"]); return {"id":existing["id"],"created":False,"duplicate":True}
     title=first(payload,("title",),""); explicit_category=first(payload,("category",),"")
     category,cleaned=voice_category(transcription)
     if explicit_category in VALID_CATEGORIES: category=explicit_category
     elif source=="ring": transcription=cleaned
-    db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category)); db().commit()
-    log_activity("info","ingest",f"Captured {source} entry",entry_id); return entry_id, True
+    group_to_create=create_group_command(transcription)
+    if group_to_create:
+        cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now())); db().commit()
+        created=bool(cursor.rowcount); log_activity("info","group",f"{'Created' if created else 'Group already exists'} {group_to_create}",group_to_create)
+        return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
+    group_name,transcription=match_note_group(transcription)
+    audio_path=audio_mime=None
+    if upload and upload.filename:
+        suffix=Path(upload.filename).suffix.lower()[:10] or ".bin"; audio_path=f"{entry_id}{suffix}"; audio_mime=upload.mimetype or "application/octet-stream"; upload.save(AUDIO_DIR/audio_path)
+    db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name)); db().commit()
+    message=f"Captured {source} entry"+(f" for {group_name}" if group_name else "")
+    log_activity("info","ingest",message,entry_id); return {"id":entry_id,"created":True,"duplicate":False,"group":group_name}
 
 @app.get("/health")
 def health():
@@ -266,7 +290,12 @@ def ingest():
     if not webhook_authorized():
         log_activity("warning","auth","Rejected webhook authentication",request.remote_addr or ""); return jsonify(error="Invalid webhook secret"),401
     payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
-    entry_id,created=store_entry(payload,upload); return jsonify(ok=True,id=entry_id,duplicate=not created),(201 if created else 200)
+    result=store_entry(payload,upload); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+
+@app.get("/api/groups")
+@api_auth
+def groups():return jsonify([dict(row) for row in db().execute("""SELECT g.display_name AS name,g.created_at,g.archived,count(e.id) AS entries
+  FROM note_groups g LEFT JOIN entries e ON e.group_name=g.display_name GROUP BY g.name ORDER BY g.archived,g.display_name""")])
 
 @app.get("/api/entries")
 @api_auth
@@ -274,7 +303,7 @@ def entries():
     where=[]; values=[]
     q=request.args.get("q","").strip()
     if q: where.append("(transcription LIKE ? OR title LIKE ? OR tags LIKE ?)"); values += [f"%{q}%"]*3
-    for field in ("category","processed","starred","archived"):
+    for field in ("category","processed","starred","archived","group_name"):
         if request.args.get(field) not in (None,""): where.append(f"{field}=?"); values.append(request.args[field])
     page=max(int(request.args.get("page",1)),1); limit=min(max(int(request.args.get("limit",50)),1),200); clause=" WHERE "+" AND ".join(where) if where else ""
     total=db().execute("SELECT count(*) FROM entries"+clause,values).fetchone()[0]
@@ -327,11 +356,15 @@ def audio(entry_id):
 @app.post("/api/manual")
 @api_auth
 def manual():
-    payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None); entry_id,_=store_entry(payload,upload,"manual"); return jsonify(ok=True,id=entry_id),201
+    payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None); result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
 
 @app.get("/api/activity")
 @api_auth
 def activity(): return jsonify([dict(r) for r in db().execute("SELECT * FROM activity ORDER BY id DESC LIMIT 100")])
+
+@app.get("/api/changes")
+@api_auth
+def changes():return jsonify(sequence=db().execute("SELECT coalesce(max(id),0) FROM activity").fetchone()[0])
 
 @app.get("/api/status")
 @api_auth
