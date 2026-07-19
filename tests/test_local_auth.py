@@ -155,6 +155,36 @@ class LocalAuthTests(unittest.TestCase):
         )
         self.assertEqual(limited.status_code, 429)
 
+    def test_trusted_cloudflare_peer_resolves_visitor_and_records_peer(self):
+        previous_hops=self.module.TRUSTED_PROXY_HOPS; previous_networks=self.module.TRUSTED_PROXY_NETWORKS
+        self.module.TRUSTED_PROXY_HOPS=1; self.module.TRUSTED_PROXY_NETWORKS=(self.module.ipaddress.ip_network("172.18.0.0/16"),)
+        try:
+            response=self.client.post("/auth/login",json={"username":"missing","password":"wrong"},headers={"Origin":"http://localhost","CF-Connecting-IP":"203.0.113.25"},environ_base={"REMOTE_ADDR":"172.18.0.4"})
+            self.assertEqual(response.status_code,401)
+            with self.module.app.app_context():attempt=self.module.db().execute("SELECT source_ip,peer_ip FROM login_attempts ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual((attempt["source_ip"],attempt["peer_ip"]),("203.0.113.25","172.18.0.4"))
+        finally:self.module.TRUSTED_PROXY_HOPS=previous_hops; self.module.TRUSTED_PROXY_NETWORKS=previous_networks
+
+    def test_forwarded_headers_from_untrusted_peer_are_ignored(self):
+        previous_hops=self.module.TRUSTED_PROXY_HOPS; previous_networks=self.module.TRUSTED_PROXY_NETWORKS
+        self.module.TRUSTED_PROXY_HOPS=1; self.module.TRUSTED_PROXY_NETWORKS=(self.module.ipaddress.ip_network("172.18.0.0/16"),)
+        try:
+            self.client.post("/auth/login",json={"username":"missing","password":"wrong"},headers={"Origin":"http://localhost","CF-Connecting-IP":"203.0.113.99","X-Forwarded-For":"203.0.113.99"},environ_base={"REMOTE_ADDR":"192.168.1.50"})
+            with self.module.app.app_context():attempt=self.module.db().execute("SELECT source_ip,peer_ip FROM login_attempts ORDER BY id DESC LIMIT 1").fetchone()
+            self.assertEqual((attempt["source_ip"],attempt["peer_ip"]),("192.168.1.50","192.168.1.50"))
+        finally:self.module.TRUSTED_PROXY_HOPS=previous_hops; self.module.TRUSTED_PROXY_NETWORKS=previous_networks
+
+    def test_configured_forwarded_hop_is_used_for_throttling(self):
+        previous_hops=self.module.TRUSTED_PROXY_HOPS; previous_networks=self.module.TRUSTED_PROXY_NETWORKS
+        self.module.TRUSTED_PROXY_HOPS=1; self.module.TRUSTED_PROXY_NETWORKS=(self.module.ipaddress.ip_network("172.18.0.0/16"),)
+        try:
+            for _ in range(5):self.client.post("/auth/login",json={"username":"attacker","password":"wrong"},headers={"Origin":"http://localhost","CF-Connecting-IP":"203.0.113.40"},environ_base={"REMOTE_ADDR":"172.18.0.4"})
+            limited=self.client.post("/auth/login",json={"username":"different","password":"wrong"},headers={"Origin":"http://localhost","CF-Connecting-IP":"203.0.113.40"},environ_base={"REMOTE_ADDR":"172.18.0.4"})
+            other=self.client.post("/auth/login",json={"username":"owner","password":"correct horse battery staple"},headers={"Origin":"http://localhost","CF-Connecting-IP":"203.0.113.41"},environ_base={"REMOTE_ADDR":"172.18.0.4"})
+            self.assertEqual(limited.status_code,429)
+            self.assertEqual(other.status_code,200)
+        finally:self.module.TRUSTED_PROXY_HOPS=previous_hops; self.module.TRUSTED_PROXY_NETWORKS=previous_networks
+
     def test_webhook_uses_its_own_secret(self):
         rejected = self.client.post("/webhook/index", json={"transcription": "no"})
         accepted = self.client.post(
