@@ -152,7 +152,6 @@ Task order more resin
 Todo, test the webhook tomorrow
 Reminder. Call the dentist
 Question: how long does the battery last
-Action turn off the workshop lights
 Note: the blue filament worked best
 ```
 
