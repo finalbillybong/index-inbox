@@ -1,8 +1,11 @@
 import importlib
+import io
+import json
 import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -319,6 +322,47 @@ class LocalAuthTests(unittest.TestCase):
         with self.module.app.app_context():
             row=self.module.db().execute("SELECT group_name FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
             self.assertIsNone(row["group_name"])
+
+    def test_group_timeline_is_chronological_and_includes_archived_groups(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Timeline seventy seven"},headers=webhook)
+        later=self.client.post("/webhook/index",json={"transcription":"Timeline 77 later observation","recordedAt":"2026-07-19T11:00:00Z"},headers=webhook)
+        earlier=self.client.post("/webhook/index",json={"transcription":"Timeline 77 earlier observation","recordedAt":"2026-07-19T10:00:00Z"},headers=webhook)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        self.client.patch("/api/groups/TIMELINE77",json={"archived":True},headers=headers)
+        response=self.client.get("/api/groups/TIMELINE77/timeline")
+        self.assertEqual(response.status_code,200)
+        self.assertTrue(response.json["group"]["archived"])
+        self.assertEqual([item["id"] for item in response.json["items"]],[earlier.json["id"],later.json["id"]])
+
+    def test_group_exports_are_scoped_and_zip_includes_audio_and_markdown(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Export sixty six"},headers=webhook)
+        grouped=self.client.post("/webhook/index",json={"transcription":"Export 66 grouped export words"},headers=webhook)
+        self.client.post("/webhook/index",json={"transcription":"unrelated export words"},headers=webhook)
+        audio_name=f"{grouped.json['id']}.webm"
+        with self.module.app.app_context():
+            (self.module.AUDIO_DIR/audio_name).write_bytes(b"test-audio")
+            self.module.db().execute("UPDATE entries SET audio_path=?,audio_mime=? WHERE id=?",(audio_name,"audio/webm",grouped.json["id"])); self.module.db().commit()
+        self.login()
+        json_response=self.client.get("/api/groups/EXPORT66/export/json")
+        self.assertEqual(json_response.status_code,200)
+        exported=json.loads(json_response.data)
+        self.assertEqual(len(exported),1)
+        self.assertEqual(exported[0]["group_name"],"EXPORT66")
+        markdown=self.client.get("/api/groups/EXPORT66/export/markdown").text
+        self.assertIn("# EXPORT66",markdown)
+        self.assertIn("grouped export words",markdown)
+        self.assertNotIn("unrelated export words",markdown)
+        archive=self.client.get("/api/groups/EXPORT66/export/zip")
+        with zipfile.ZipFile(io.BytesIO(archive.data)) as bundle:
+            self.assertEqual(set(bundle.namelist()),{"entries.json","notes.md",f"audio/{audio_name}"})
+            self.assertEqual(bundle.read(f"audio/{audio_name}"),b"test-audio")
+
+    def test_group_timeline_and_exports_reject_unknown_group(self):
+        self.login()
+        self.assertEqual(self.client.get("/api/groups/UNKNOWN999/timeline").status_code,404)
+        self.assertEqual(self.client.get("/api/groups/UNKNOWN999/export/json").status_code,404)
 
 
 if __name__ == "__main__":
