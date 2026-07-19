@@ -237,6 +237,10 @@ def normalized_group_name(value):
     value=str(value).strip()
     return value.upper() if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}",value) else None
 
+def normalized_group_alias(value):
+    value=re.sub(r"\s+"," ",str(value).strip().rstrip(".! ")).lower()
+    return value if 1<=len(value)<=96 and re.fullmatch(r"[a-z0-9_-]+(?: [a-z0-9_-]+)*",value) else None
+
 DIGIT_WORDS={"zero":"0","oh":"0","one":"1","two":"2","three":"3","four":"4","five":"5","six":"6","seven":"7","eight":"8","nine":"9"}
 NUMBER_UNITS={word:int(value) for word,value in DIGIT_WORDS.items() if word!="oh"}; NUMBER_UNITS["oh"]=0
 NUMBER_TENS={"ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19,
@@ -349,6 +353,67 @@ def ingest():
 def groups():return jsonify([dict(row) for row in db().execute("""SELECT g.display_name AS name,g.created_at,g.archived,count(e.id) AS entries
   FROM note_groups g LEFT JOIN entries e ON e.group_name=g.display_name GROUP BY g.name ORDER BY g.archived,g.display_name""")])
 
+@app.patch("/api/groups/<name>")
+@api_auth
+def update_group(name):
+    current=normalized_group_name(name); body=request.get_json(force=True); connection=db()
+    row=connection.execute("SELECT * FROM note_groups WHERE name=?",(current,)).fetchone() if current else None
+    if not row:return jsonify(error="Group not found"),404
+    target=current; renamed=False
+    if "name" in body:
+        target=normalized_group_name(body["name"])
+        if not target:return jsonify(error="Group names must be 1-32 letters, numbers, hyphens or underscores"),400
+        if target!=current and connection.execute("SELECT 1 FROM note_groups WHERE name=?",(target,)).fetchone():return jsonify(error="A group with that name already exists"),409
+        alias_owner=connection.execute("SELECT group_name FROM note_group_aliases WHERE alias=?",(target.lower(),)).fetchone()
+        if alias_owner and alias_owner["group_name"].lower()!=row["display_name"].lower():return jsonify(error="That name conflicts with another group's alias"),409
+    if "archived" in body and not isinstance(body["archived"],bool):return jsonify(error="archived must be true or false"),400
+    archived=int(body["archived"]) if "archived" in body else row["archived"]
+    if target==current and archived==row["archived"]:return jsonify(ok=True,name=row["display_name"],archived=bool(archived))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if target!=current:
+            connection.execute("UPDATE entries SET group_name=? WHERE group_name=?",(target,row["display_name"]))
+            connection.execute("UPDATE note_group_aliases SET group_name=? WHERE group_name=?",(target,row["display_name"]))
+            connection.execute("UPDATE note_groups SET name=?,display_name=? WHERE name=?",(target,target,current))
+            connection.execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",(target.lower(),target)); renamed=True
+        connection.execute("UPDATE note_groups SET archived=? WHERE name=?",(archived,target)); connection.commit()
+    except sqlite3.IntegrityError:connection.rollback(); return jsonify(error="Group name or alias conflicts with an existing group"),409
+    if renamed:log_activity("info","group",f"Renamed group {row['display_name']} to {target}",target)
+    if archived!=row["archived"]:log_activity("info","group",f"{'Archived' if archived else 'Reopened'} group {target}",target)
+    return jsonify(ok=True,name=target,archived=bool(archived))
+
+@app.get("/api/groups/<name>/aliases")
+@api_auth
+def group_aliases(name):
+    name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
+    if not row:return jsonify(error="Group not found"),404
+    return jsonify(group=row["display_name"],aliases=[item["alias"] for item in db().execute("SELECT alias FROM note_group_aliases WHERE group_name=? ORDER BY alias",(row["display_name"],))])
+
+@app.post("/api/groups/<name>/aliases")
+@api_auth
+def add_group_alias(name):
+    name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
+    if not row:return jsonify(error="Group not found"),404
+    alias=normalized_group_alias((request.get_json(force=True) or {}).get("alias",""))
+    if not alias:return jsonify(error="Aliases must be 1-96 letters, numbers, spaces, hyphens or underscores"),400
+    owner=db().execute("SELECT group_name FROM note_group_aliases WHERE alias=?",(alias,)).fetchone()
+    if owner and owner["group_name"].lower()!=row["display_name"].lower():return jsonify(error=f"Alias already belongs to {owner['group_name']}"),409
+    created=not owner
+    if created:db().execute("INSERT INTO note_group_aliases(alias,group_name) VALUES(?,?)",(alias,row["display_name"])); db().commit(); log_activity("info","group",f"Added alias '{alias}' to {row['display_name']}",row["display_name"])
+    return jsonify(ok=True,alias=alias,created=created),(201 if created else 200)
+
+@app.delete("/api/groups/<name>/aliases")
+@api_auth
+def delete_group_alias(name):
+    name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
+    if not row:return jsonify(error="Group not found"),404
+    alias=normalized_group_alias((request.get_json(force=True) or {}).get("alias",""))
+    if not alias:return jsonify(error="Invalid alias"),400
+    if alias==row["display_name"].lower():return jsonify(error="The canonical group name cannot be removed as an alias"),409
+    cursor=db().execute("DELETE FROM note_group_aliases WHERE alias=? AND group_name=?",(alias,row["display_name"])); db().commit()
+    if not cursor.rowcount:return jsonify(error="Alias not found"),404
+    log_activity("info","group",f"Removed alias '{alias}' from {row['display_name']}",row["display_name"]); return jsonify(ok=True)
+
 @app.delete("/api/groups/<name>")
 @api_auth
 def delete_group(name):
@@ -375,11 +440,19 @@ def entries():
 @app.patch("/api/entries/<entry_id>")
 @api_auth
 def update_entry(entry_id):
-    body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category"}; updates={k:body[k] for k in body if k in allowed}
+    body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category","group_name"}; updates={k:body[k] for k in body if k in allowed}
     if "category" in updates and updates["category"] not in VALID_CATEGORIES:return jsonify(error="Invalid category"),400
+    if "group_name" in updates:
+        requested=normalized_group_name(updates["group_name"]) if updates["group_name"] else None
+        if requested:
+            group=db().execute("SELECT display_name FROM note_groups WHERE name=? AND archived=0",(requested,)).fetchone()
+            if not group:return jsonify(error="Group not found or archived"),400
+            updates["group_name"]=group["display_name"]
+        else:updates["group_name"]=None
     if not updates:return jsonify(error="No supported fields supplied"),400
-    values=[int(v) if k in {"starred","processed","archived"} else str(v) for k,v in updates.items()]
+    previous=db().execute("SELECT group_name FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","archived"} else (None if v is None else str(v)) for k,v in updates.items()]
     cur=db().execute(f"UPDATE entries SET {', '.join(k+'=?' for k in updates)} WHERE id=?",(*values,entry_id)); db().commit()
+    if cur.rowcount and "group_name" in updates and previous["group_name"]!=updates["group_name"]:log_activity("info","group",f"Moved entry from {previous['group_name'] or 'standalone'} to {updates['group_name'] or 'standalone'}",entry_id)
     return (jsonify(ok=True) if cur.rowcount else (jsonify(error="Not found"),404))
 
 @app.post("/api/entries/bulk")
