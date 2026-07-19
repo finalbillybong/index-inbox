@@ -11,7 +11,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Phase 4 — Suggested grouping
 - [x] Phase 5 — Cloudflare-aware client IP handling
 - [x] Phase 6 — Backup status and restore verification
-- [ ] **Phase 7 — Playwright browser tests (in progress)**
+- [x] Phase 7 — Playwright browser tests
 - [ ] Phase 8 — Final Unraid regression and release
 
 ## Phase 1 — Group lifecycle and manual organization
@@ -103,7 +103,7 @@ Cover first-run setup, login, capture refresh, group lifecycle, suggestions, tim
 - [x] Cover timeline editing and group downloads
 - [x] Cover narrow mobile viewport behavior
 - [x] Add Chromium CI execution and contributor documentation
-- [ ] Validate locally and in GitHub Actions
+- [x] Validate locally and in GitHub Actions
 
 ## Phase 8 — Final release validation
 
