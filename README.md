@@ -187,6 +187,8 @@ AUTH_ALLOWED_ORIGINS=https://index.example.com
 
 By default, Index Inbox ignores `CF-Connecting-IP` and `X-Forwarded-For`. Login throttling therefore uses the direct network peer, which is safe but may treat every Cloudflare Tunnel visitor as the same address.
 
+**This configuration is optional.** Most single-user installations should leave both variables absent. Docker Compose supplies `TRUSTED_PROXY_HOPS=0`, so no `.env` change is required and forwarding headers remain safely disabled.
+
 Only enable proxy trust when the application port can be reached exclusively through a known reverse proxy or tunnel peer. Configure both the number of forwarding hops and the narrowest peer address or network that contains that proxy:
 
 ```dotenv

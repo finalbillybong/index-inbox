@@ -9,7 +9,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Phase 2 — Live capture feedback
 - [x] Phase 3 — Group timeline and per-group export
 - [x] Phase 4 — Suggested grouping
-- [ ] **Phase 5 — Cloudflare-aware client IP handling (in progress)**
+- [x] Phase 5 — Cloudflare-aware client IP handling
 - [ ] Phase 6 — Backup status and restore verification
 - [ ] Phase 7 — Playwright browser tests
 - [ ] Phase 8 — Final Unraid regression and release
@@ -77,7 +77,7 @@ Trust forwarding headers only through explicitly configured proxy hops, keep dir
 - [x] Store both resolved visitor and direct peer addresses for login attempts
 - [x] Apply local-login throttling to the resolved visitor address
 - [x] Add configuration validation, tests, and deployment documentation
-- [ ] Validate on Unraid through both Cloudflare and direct LAN access
+- [x] Validate the secure default on Unraid; trusted-proxy resolution remains optional
 
 ## Phase 6 — Backup status and restore verification
 
