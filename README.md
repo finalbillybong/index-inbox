@@ -11,6 +11,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - Retry deduplication and delivery activity history
 - Editable transcriptions, tags, categories, starring and archiving
 - Explicit voice-created note groups with combined presentation
+- Chronological group timelines with editing, audio, and group-scoped exports
 - Automatic background refresh with live, dismissible capture notices
 - Search, filters, pagination and bulk actions
 - Original webhook payload inspection
@@ -307,12 +308,23 @@ Use **Manage groups** in the web interface to remove empty or populated groups. 
 
 The group manager also supports:
 
+- **Timeline** — opens the complete group history from oldest to newest, including editable transcription, tags, category, and any stored audio. Pending edits finish saving before the timeline closes, then the main inbox reloads to show them.
 - **Rename** — updates every assigned entry atomically and retains the old name as a spoken alias.
 - **Archive** — closes the group so new voice captures no longer match it while preserving its entries and aliases.
 - **Reopen** — makes an archived group available for voice matching and manual assignment again.
 - **Aliases** — lists the phrases that match a group and allows additional spoken forms to be added or removed. Canonical group-name aliases cannot be removed, and aliases cannot be shared by different groups.
 
 Each note card includes a group selector. Choose an active group to assign or move the note, or choose **Standalone** to remove it from its current group. Archived groups remain visible on entries already assigned to them but cannot receive new manual assignments until reopened.
+
+### Per-group exports
+
+Open **Manage groups**, select **Timeline** for a group, and choose one of its export controls:
+
+- **Markdown** creates a chronological readable document containing the group name, timestamps, categories, tags, and transcriptions.
+- **JSON** preserves the complete stored entry records for that group, including their original payload metadata.
+- **ZIP + audio** contains both formats plus every available audio file assigned to that group.
+
+Exports are scoped to the selected group. Empty and archived groups remain available, and exporting an empty group produces valid empty Markdown, JSON, or ZIP output.
 
 Server administrators can also inspect groups or remove an incorrectly transcribed empty group:
 
