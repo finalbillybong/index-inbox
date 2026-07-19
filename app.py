@@ -1,4 +1,4 @@
-import csv, hashlib, io, ipaddress, json, os, re, secrets, sqlite3, urllib.request, uuid, zipfile
+import csv, hashlib, io, ipaddress, json, os, re, secrets, sqlite3, tempfile, urllib.request, uuid, zipfile
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
@@ -11,7 +11,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data")); AUDIO_DIR = DATA_DIR / "audio"; DB_PATH = DATA_DIR / "index-inbox.sqlite3"
+DATA_DIR = Path(os.getenv("DATA_DIR", "./data")); AUDIO_DIR = DATA_DIR / "audio"; BACKUP_DIR=DATA_DIR / "backups"; DB_PATH = DATA_DIR / "index-inbox.sqlite3"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", ""); PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
 AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "firebase").strip().lower()
 if AUTH_PROVIDER not in {"firebase", "local"}: raise RuntimeError("AUTH_PROVIDER must be 'firebase' or 'local'")
@@ -36,7 +36,7 @@ BACKUP_HOOK_URL = os.getenv("BACKUP_HOOK_URL", "")
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
 CAPTURE_EVENT_KINDS = {"capture_standalone", "capture_grouped", "group_created", "group_exists",
   "group_unrecognized", "webhook_rejected", "ingest_error"}
-DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True); BACKUP_DIR.mkdir(parents=True,exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
 if AUTH_PROVIDER == "firebase" and PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
 
@@ -74,6 +74,8 @@ def init_db():
       CREATE TABLE IF NOT EXISTS note_group_aliases (alias TEXT PRIMARY KEY COLLATE NOCASE, group_name TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS group_suggestion_dismissals (entry_id TEXT NOT NULL, group_name TEXT NOT NULL,
         dismissed_at TEXT NOT NULL, PRIMARY KEY(entry_id,group_name));
+      CREATE TABLE IF NOT EXISTS backup_runs (id TEXT PRIMARY KEY,requested_at TEXT NOT NULL,completed_at TEXT,
+        status TEXT NOT NULL,archive_name TEXT,archive_bytes INTEGER,error TEXT NOT NULL DEFAULT '');
     """)
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
@@ -626,7 +628,8 @@ def capture_too_large(_error):
 def status():
     count=db().execute("SELECT count(*) FROM entries").fetchone()[0]; audio_count=db().execute("SELECT count(*) FROM entries WHERE audio_path IS NOT NULL").fetchone()[0]
     audio_bytes=sum(p.stat().st_size for p in AUDIO_DIR.iterdir() if p.is_file()); db_bytes=DB_PATH.stat().st_size if DB_PATH.exists() else 0
-    return jsonify(entries=count,audioEntries=audio_count,audioBytes=audio_bytes,databaseBytes=db_bytes,lastBackupHook=BACKUP_HOOK_URL!="",trustedProxyHops=TRUSTED_PROXY_HOPS)
+    backup=db().execute("SELECT * FROM backup_runs ORDER BY requested_at DESC LIMIT 1").fetchone(); latest=db().execute("SELECT * FROM backup_runs WHERE status='success' ORDER BY completed_at DESC LIMIT 1").fetchone()
+    return jsonify(entries=count,audioEntries=audio_count,audioBytes=audio_bytes,databaseBytes=db_bytes,lastBackupHook=BACKUP_HOOK_URL!="",trustedProxyHops=TRUSTED_PROXY_HOPS,lastBackup=dict(backup) if backup else None,latestVerifiedBackup=dict(latest) if latest else None)
 
 def export_rows(): return [dict(r) for r in db().execute("SELECT * FROM entries ORDER BY created_at DESC")]
 
@@ -667,6 +670,78 @@ def retention():
     for row in rows:
         (AUDIO_DIR/row["audio_path"]).unlink(missing_ok=True); db().execute("UPDATE entries SET audio_path=NULL,audio_mime=NULL WHERE id=?",(row["id"],)); removed+=1
     db().commit(); log_activity("info","retention",f"Removed {removed} old audio files"); return jsonify(ok=True,removed=removed)
+
+def file_digest(path):
+    digest=hashlib.sha256()
+    with open(path,"rb") as source:
+        for chunk in iter(lambda:source.read(1024*1024),b""):digest.update(chunk)
+    return digest.hexdigest(),path.stat().st_size
+
+def create_backup_archive():
+    run_id=str(uuid.uuid4()); requested=now(); archive_name=f"index-inbox-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{run_id[:8]}.zip"
+    db().execute("INSERT INTO backup_runs(id,requested_at,status,archive_name) VALUES(?,?,?,?)",(run_id,requested,"running",archive_name)); db().commit()
+    snapshot_path=None; temporary_archive=None
+    try:
+        snapshot=tempfile.NamedTemporaryFile(prefix="index-inbox-snapshot-",suffix=".sqlite3",delete=False); snapshot_path=Path(snapshot.name); snapshot.close()
+        destination=sqlite3.connect(snapshot_path); db().backup(destination)
+        completed=now(); destination.execute("UPDATE backup_runs SET status='success',completed_at=?,archive_name=?,error='' WHERE id=?",(completed,archive_name,run_id)); destination.commit()
+        check=destination.execute("PRAGMA quick_check").fetchone()[0]
+        if check!="ok":raise RuntimeError(f"SQLite snapshot integrity check failed: {check}")
+        entry_count=destination.execute("SELECT count(*) FROM entries").fetchone()[0]
+        audio_rows=destination.execute("SELECT audio_path FROM entries WHERE audio_path IS NOT NULL ORDER BY audio_path").fetchall(); destination.close()
+        files={}; digest,size=file_digest(snapshot_path); files["index-inbox.sqlite3"]={"sha256":digest,"bytes":size}
+        audio_paths=[]
+        for row in audio_rows:
+            source=AUDIO_DIR/row[0]
+            if not source.is_file():raise RuntimeError(f"Stored audio file is missing: {row[0]}")
+            digest,size=file_digest(source); archive_path=f"audio/{row[0]}"; files[archive_path]={"sha256":digest,"bytes":size}; audio_paths.append((source,archive_path))
+        manifest={"version":1,"createdAt":completed,"runId":run_id,"entries":entry_count,"audioEntries":len(audio_paths),"files":files}
+        handle=tempfile.NamedTemporaryFile(prefix=".backup-",suffix=".zip",dir=BACKUP_DIR,delete=False); temporary_archive=Path(handle.name); handle.close()
+        with zipfile.ZipFile(temporary_archive,"w",zipfile.ZIP_DEFLATED) as archive:
+            archive.write(snapshot_path,"index-inbox.sqlite3")
+            for source,archive_path in audio_paths:archive.write(source,archive_path)
+            archive.writestr("manifest.json",json.dumps(manifest,indent=2,sort_keys=True))
+        final_path=BACKUP_DIR/archive_name; temporary_archive.replace(final_path); archive_bytes=final_path.stat().st_size
+        db().execute("UPDATE backup_runs SET status='success',completed_at=?,archive_bytes=?,error='' WHERE id=?",(completed,archive_bytes,run_id)); db().commit()
+        archives=sorted(BACKUP_DIR.glob("index-inbox-*.zip"),key=lambda path:path.stat().st_mtime,reverse=True)
+        for old in archives[5:]:old.unlink(missing_ok=True)
+        log_activity("info","backup",f"Created verified backup {archive_name}",run_id); return dict(db().execute("SELECT * FROM backup_runs WHERE id=?",(run_id,)).fetchone())
+    except Exception as error:
+        db().execute("UPDATE backup_runs SET status='failed',completed_at=?,error=? WHERE id=?",(now(),str(error)[:1000],run_id)); db().commit(); log_activity("error","backup","Local backup failed",str(error)); raise
+    finally:
+        if snapshot_path:snapshot_path.unlink(missing_ok=True)
+        if temporary_archive:temporary_archive.unlink(missing_ok=True)
+
+def verify_backup_archive(path):
+    with zipfile.ZipFile(path) as archive:
+        try:manifest=json.loads(archive.read("manifest.json"))
+        except (KeyError,json.JSONDecodeError) as error:raise ValueError("Backup manifest is missing or invalid") from error
+        if manifest.get("version")!=1 or not isinstance(manifest.get("files"),dict):raise ValueError("Unsupported backup manifest")
+        expected={"manifest.json",*manifest["files"]}
+        if set(archive.namelist())!=expected:raise ValueError("Backup contains missing or unexpected files")
+        for name,metadata in manifest["files"].items():
+            digest=hashlib.sha256(); size=0
+            with archive.open(name) as source:
+                for chunk in iter(lambda:source.read(1024*1024),b""):digest.update(chunk); size+=len(chunk)
+            if digest.hexdigest()!=metadata.get("sha256") or size!=metadata.get("bytes"):raise ValueError(f"Backup checksum failed for {name}")
+        with tempfile.TemporaryDirectory(prefix="index-inbox-verify-") as directory:
+            snapshot=Path(directory)/"index-inbox.sqlite3"; snapshot.write_bytes(archive.read("index-inbox.sqlite3")); connection=sqlite3.connect(snapshot)
+            check=connection.execute("PRAGMA quick_check").fetchone()[0]; entries=connection.execute("SELECT count(*) FROM entries").fetchone()[0]; audio_entries=connection.execute("SELECT count(*) FROM entries WHERE audio_path IS NOT NULL").fetchone()[0]; connection.close()
+        if check!="ok" or entries!=manifest.get("entries") or audio_entries!=manifest.get("audioEntries"):raise ValueError("Backup database contents do not match the manifest")
+        return {"ok":True,"runId":manifest["runId"],"entries":entries,"audioEntries":audio_entries,"createdAt":manifest["createdAt"]}
+
+@app.post("/api/backups")
+@api_auth
+def create_backup():
+    try:return jsonify(ok=True,backup=create_backup_archive()),201
+    except Exception:return jsonify(error="Backup creation failed; inspect Recent activity"),500
+
+@app.get("/api/backups/latest")
+@api_auth
+def download_latest_backup():
+    row=db().execute("SELECT archive_name FROM backup_runs WHERE status='success' ORDER BY completed_at DESC LIMIT 1").fetchone()
+    if not row or not (BACKUP_DIR/row["archive_name"]).is_file():return jsonify(error="No local backup is available"),404
+    return send_file(BACKUP_DIR/row["archive_name"],mimetype="application/zip",as_attachment=True,download_name=row["archive_name"])
 
 @app.post("/api/backup-hook")
 @api_auth
@@ -764,6 +839,20 @@ def delete_empty_note_group(name):
     if not row:raise click.ClickException("Note group not found")
     if db().execute("SELECT count(*) FROM entries WHERE group_name=?",(row["display_name"],)).fetchone()[0]:raise click.ClickException("Group is not empty")
     db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_groups WHERE name=?",(name,)); db().commit(); click.echo(f"Deleted empty group {row['display_name']}")
+
+@app.cli.group("backup")
+def backup_cli():"""Create and verify local backup archives."""
+
+@backup_cli.command("create")
+def backup_create_cli():
+    result=create_backup_archive(); click.echo(str(BACKUP_DIR/result["archive_name"]))
+
+@backup_cli.command("verify")
+@click.argument("archive",type=click.Path(exists=True,dir_okay=False,path_type=Path))
+def backup_verify_cli(archive):
+    try:result=verify_backup_archive(archive)
+    except (ValueError,zipfile.BadZipFile) as error:raise click.ClickException(str(error))
+    click.echo(f"Verified {archive}: {result['entries']} entries, {result['audioEntries']} audio files, created {result['createdAt']}")
 @app.get("/")
 def index():return send_from_directory("static","index.html")
 @app.get("/<path:path>")
