@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 class LocalAuthTests(unittest.TestCase):
@@ -185,6 +186,59 @@ class LocalAuthTests(unittest.TestCase):
         repeated=self.client.post("/webhook/index",json={"transcription":"create pw155"},headers=headers)
         self.assertEqual(repeated.status_code,200)
         self.assertFalse(repeated.json["groupCreated"])
+
+    def test_change_feed_reports_typed_capture_events_without_note_text(self):
+        login=self.login()
+        initial=self.client.get("/api/changes").json["sequence"]
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Event eighty eight"},headers=webhook)
+        self.client.post("/webhook/index",json={"transcription":"Event 88 confidential grouped words"},headers=webhook)
+        self.client.post("/webhook/index",json={"transcription":"confidential standalone words"},headers=webhook)
+        feed=self.client.get(f"/api/changes?since={initial}")
+        self.assertEqual(feed.status_code,200)
+        kinds=[event["kind"] for event in feed.json["events"]]
+        self.assertEqual(kinds,["group_created","capture_grouped","capture_standalone"])
+        messages=" ".join(event["message"] for event in feed.json["events"]).lower()
+        self.assertNotIn("confidential",messages)
+        self.assertGreater(feed.json["sequence"],initial)
+        empty=self.client.get(f"/api/changes?since={feed.json['sequence']}")
+        self.assertEqual(empty.json["events"],[])
+
+    def test_change_feed_reports_repeated_and_unrecognized_group_commands(self):
+        self.login(); initial=self.client.get("/api/changes").json["sequence"]
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Notice ninety nine"},headers=webhook)
+        self.client.post("/webhook/index",json={"transcription":"Create Notice 99"},headers=webhook)
+        unmatched=self.client.post("/webhook/index",json={"transcription":"Create a group without a number"},headers=webhook)
+        self.assertEqual(unmatched.status_code,201)
+        self.assertIsNone(unmatched.json["group"])
+        events=self.client.get(f"/api/changes?since={initial}").json["events"]
+        self.assertEqual([event["kind"] for event in events],["group_created","group_exists","group_unrecognized"])
+
+    def test_change_feed_reports_rejected_webhook(self):
+        self.login(); initial=self.client.get("/api/changes").json["sequence"]
+        rejected=self.client.post("/webhook/index",json={"transcription":"private rejected text"})
+        self.assertEqual(rejected.status_code,401)
+        events=self.client.get(f"/api/changes?since={initial}").json["events"]
+        self.assertEqual(len(events),1)
+        self.assertEqual(events[0]["kind"],"webhook_rejected")
+        self.assertNotIn("private",events[0]["message"].lower())
+
+    def test_change_feed_reports_ingestion_failure_without_exception_details(self):
+        self.login(); initial=self.client.get("/api/changes").json["sequence"]
+        with patch.object(self.module,"store_entry",side_effect=RuntimeError("sensitive internal failure")):
+            failed=self.client.post("/webhook/index",json={"transcription":"private failed text"},headers={"X-Webhook-Secret":"test-webhook-secret"})
+        self.assertEqual(failed.status_code,500)
+        events=self.client.get(f"/api/changes?since={initial}").json["events"]
+        self.assertEqual(len(events),1)
+        self.assertEqual(events[0]["kind"],"ingest_error")
+        self.assertNotIn("sensitive",events[0]["message"].lower())
+        self.assertNotIn("private",events[0]["message"].lower())
+
+    def test_change_feed_rejects_invalid_sequence(self):
+        self.login()
+        response=self.client.get("/api/changes?since=invalid")
+        self.assertEqual(response.status_code,400)
 
     def test_natural_spoken_number_group_aliases(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}

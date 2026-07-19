@@ -5,8 +5,8 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 ## Progress
 
 - [x] Phase 0 — Stabilize the baseline
-- [ ] **Phase 1 — Group lifecycle and manual organization (in progress)**
-- [ ] Phase 2 — Live capture feedback
+- [x] Phase 1 — Group lifecycle and manual organization
+- [ ] **Phase 2 — Live capture feedback (in progress)**
 - [ ] Phase 3 — Group timeline and per-group export
 - [ ] Phase 4 — Suggested grouping
 - [ ] Phase 5 — Cloudflare-aware client IP handling
@@ -26,13 +26,22 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Reject alias and group-name conflicts clearly
 - [x] Record lifecycle operations in activity history
 - [x] Add migrations, API tests, UI controls, and documentation
-- [ ] Validate on Unraid
+- [x] Validate on Unraid
 
 Removal remains non-destructive: removing a group converts its entries to standalone notes and never deletes audio or payloads.
 
 ## Phase 2 — Live capture feedback
 
 Add typed, deduplicated browser notices for standalone captures, grouped captures, group creation, repeated commands, unmatched commands, and ingestion errors without exposing full note text.
+
+- [x] Return typed, incremental events from the change polling endpoint
+- [x] Show dismissible in-app notices without interrupting editing
+- [x] Deduplicate notices across polling cycles
+- [x] Report standalone captures and grouped captures separately
+- [x] Report new groups, repeated create commands, and unmatched create commands
+- [x] Report rejected webhooks and ingestion failures without exposing note content
+- [x] Add API tests, browser syntax checks, and documentation
+- [ ] Validate on Unraid
 
 ## Phase 3 — Group timeline and export
 
