@@ -10,7 +10,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Phase 3 — Group timeline and per-group export
 - [x] Phase 4 — Suggested grouping
 - [x] Phase 5 — Cloudflare-aware client IP handling
-- [ ] Phase 6 — Backup status and restore verification
+- [ ] **Phase 6 — Backup status and restore verification (in progress)**
 - [ ] Phase 7 — Playwright browser tests
 - [ ] Phase 8 — Final Unraid regression and release
 
@@ -82,6 +82,15 @@ Trust forwarding headers only through explicitly configured proxy hops, keep dir
 ## Phase 6 — Backup status and restore verification
 
 Track backup requests and outcomes, create verifiable manifests, expose status in the UI, and document a safe staging restore test.
+
+- [x] Create consistent SQLite snapshots with stored audio bundles
+- [x] Include SHA-256 manifests and reject incomplete or modified archives
+- [x] Track backup requests, success, failure, size, and completion time
+- [x] Expose backup status, creation, and latest-download controls
+- [x] Add a read-only CLI verification workflow
+- [x] Retain a bounded number of local backup archives
+- [x] Add tests, documentation, and Unraid restore validation
+- [ ] Validate on Unraid
 
 ## Phase 7 — Playwright browser tests
 
