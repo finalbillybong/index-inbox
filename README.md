@@ -81,10 +81,12 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 | --- | --- | --- |
 | `WEBHOOK_SECRET` | Yes | Random secret used to authenticate incoming Index webhooks |
 | `AUTH_PROVIDER` | Yes | `local` for self-hosted accounts or `firebase` for Firebase Authentication |
-| `AUTH_EXPECTED_ORIGIN` | Local | Public HTTPS origin, such as `https://index.example.com` |
+| `AUTH_ALLOWED_ORIGINS` | Local | Comma-separated allowed browser origins, including scheme and port |
+| `AUTH_EXPECTED_ORIGIN` | Local | Deprecated single-origin setting retained for compatibility |
 | `AUTH_COOKIE_SECURE` | Local | Keep `true` in production; set `false` only for localhost HTTP testing |
 | `AUTH_SESSION_DAYS` | Local | Absolute local-session lifetime, default 30 days |
 | `AUTH_IDLE_DAYS` | Local | Local-session idle timeout, default 7 days |
+| `LOCAL_SETUP_TOKEN` | Local setup | One-time secret required to create the first owner through the browser |
 | `FIREBASE_PROJECT_ID` | Firebase | Firebase project identifier |
 | `FIREBASE_API_KEY` | Firebase | Firebase web application API key |
 | `FIREBASE_AUTH_DOMAIN` | Firebase | Usually `PROJECT_ID.firebaseapp.com` |
@@ -104,18 +106,21 @@ Local mode keeps account credentials and sessions in the same SQLite database as
 
    ```dotenv
    AUTH_PROVIDER=local
-   AUTH_EXPECTED_ORIGIN=https://index.example.com
+   AUTH_ALLOWED_ORIGINS=https://index.example.com,http://192.168.1.10:5050
    AUTH_COOKIE_SECURE=true
+   LOCAL_SETUP_TOKEN=generate-a-separate-random-value
    ```
 
-2. Build and start the container, then create the first account interactively:
+2. Generate a separate setup token, build and start the container:
 
    ```bash
+   openssl rand -hex 32
    docker compose up -d --build
-   docker exec -it index-inbox flask auth create-user
    ```
 
-   Passwords must be at least 12 characters and are hashed with Argon2id. They are never supplied through environment variables or command arguments.
+   Put the generated value in `LOCAL_SETUP_TOKEN`, open Index Inbox, and use it on the first-run screen to create the owner account. Web setup is permanently unavailable after the first local user exists. Remove `LOCAL_SETUP_TOKEN` from `.env` afterward and recreate the container with `docker compose up -d --force-recreate`.
+
+   Alternatively, leave `LOCAL_SETUP_TOKEN` empty and create the first account interactively with `docker exec -it index-inbox flask auth create-user`. Passwords must be at least 12 characters and are hashed with Argon2id. Passwords are never supplied through environment variables or command arguments.
 
 3. To change a password or invalidate signed-in devices:
 
@@ -128,7 +133,9 @@ Local mode keeps account credentials and sessions in the same SQLite database as
 
 Changing a password revokes every session for that account. Local login is limited after repeated failures. The browser uses a Secure, HttpOnly, SameSite cookie plus a separate CSRF token for changes.
 
-For local HTTP testing only, use `AUTH_COOKIE_SECURE=false` and set `AUTH_EXPECTED_ORIGIN` to the exact local origin. Never use that setting on an internet-accessible installation.
+`AUTH_ALLOWED_ORIGINS` accepts multiple exact origins separated by commas, for example a Cloudflare Tunnel URL and a LAN address. Include the scheme and non-default port, and omit paths and trailing slashes.
+
+Secure cookies require HTTPS. If the Cloudflare URL uses HTTPS but the LAN address uses plain HTTP, `AUTH_COOKIE_SECURE=true` protects the remote session but the browser will not authenticate over the LAN HTTP address. Prefer HTTPS on both routes. Use `AUTH_COOKIE_SECURE=false` only for isolated HTTP testing; it permits the local-auth cookie to travel without transport encryption.
 
 ## Firebase setup
 
@@ -241,7 +248,7 @@ If the web interface appears stale after an update, confirm the version shown in
 - Use HTTPS for all public access.
 - Keep the webhook secret in a custom header.
 - Keep the Firebase email allowlist enabled when using Firebase mode.
-- Keep `AUTH_COOKIE_SECURE=true` and configure the exact `AUTH_EXPECTED_ORIGIN` in local mode.
+- Keep `AUTH_COOKIE_SECURE=true` and configure exact `AUTH_ALLOWED_ORIGINS` in local mode.
 - Never commit `.env` or service-account JSON files.
 - Restrict filesystem access to the persistent data and credentials paths.
 - Disable cloud transcription or backup in the Pebble app if an entirely local processing path is required.
