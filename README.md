@@ -435,6 +435,24 @@ docker compose up -d
 
 Existing entries and audio remain intact.
 
+## Development tests
+
+Run the Python API and security regression suite with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The Playwright suite starts its own temporary local-auth server under the system temporary directory. It never reads or modifies the configured production `INDEX_DATA_PATH`:
+
+```bash
+npm ci
+npx playwright install chromium
+npm run test:e2e
+```
+
+The browser flow covers first-run setup, subsequent login, live webhook refresh, note groups, suggestion acceptance, rename/archive/reopen behavior, timeline saving, group downloads, and a narrow mobile viewport. Pull requests and pushes to `main` run the Chromium suite in GitHub Actions; failed runs upload the Playwright HTML report, traces, and screenshots for seven days.
+
 ## Troubleshooting
 
 Check container health and logs:
