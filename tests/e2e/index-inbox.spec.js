@@ -30,7 +30,7 @@ test.describe.serial('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.0.0-rc.1');
+    await expect(page.locator('.version')).toHaveText('v1.0.0');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
