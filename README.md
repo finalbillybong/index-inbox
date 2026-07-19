@@ -11,6 +11,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - Retry deduplication and delivery activity history
 - Editable transcriptions, tags, categories, starring and archiving
 - Explicit voice-created note groups with combined presentation
+- Chronological group timelines with editing, audio, and group-scoped exports
 - Automatic background refresh with live, dismissible capture notices
 - Search, filters, pagination and bulk actions
 - Original webhook payload inspection
