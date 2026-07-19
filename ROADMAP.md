@@ -10,7 +10,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Phase 3 — Group timeline and per-group export
 - [x] Phase 4 — Suggested grouping
 - [x] Phase 5 — Cloudflare-aware client IP handling
-- [ ] **Phase 6 — Backup status and restore verification (in progress)**
+- [x] Phase 6 — Backup status and restore verification
 - [ ] Phase 7 — Playwright browser tests
 - [ ] Phase 8 — Final Unraid regression and release
 
@@ -90,7 +90,7 @@ Track backup requests and outcomes, create verifiable manifests, expose status i
 - [x] Add a read-only CLI verification workflow
 - [x] Retain a bounded number of local backup archives
 - [x] Add tests, documentation, and Unraid restore validation
-- [ ] Validate on Unraid
+- [x] Validate on Unraid
 
 ## Phase 7 — Playwright browser tests
 
