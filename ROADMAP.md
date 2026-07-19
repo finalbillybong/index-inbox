@@ -7,7 +7,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Phase 0 — Stabilize the baseline
 - [x] Phase 1 — Group lifecycle and manual organization
 - [x] Phase 2 — Live capture feedback
-- [ ] **Phase 3 — Group timeline and per-group export (in progress)**
+- [x] Phase 3 — Group timeline and per-group export
 - [ ] Phase 4 — Suggested grouping
 - [ ] Phase 5 — Cloudflare-aware client IP handling
 - [ ] Phase 6 — Backup status and restore verification
@@ -53,7 +53,7 @@ Add a dedicated chronological group view with audio and editing, plus Markdown, 
 - [x] Add group-scoped ZIP exports containing metadata, Markdown, and available audio
 - [x] Keep empty and archived groups accessible from the group manager
 - [x] Add API tests, browser syntax checks, and documentation
-- [ ] Validate on Unraid
+- [x] Validate on Unraid
 
 ## Phase 4 — Suggested grouping
 
