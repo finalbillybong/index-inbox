@@ -64,6 +64,7 @@ def init_db():
       CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username,source_ip,attempted_at);
       CREATE TABLE IF NOT EXISTS note_groups (name TEXT PRIMARY KEY COLLATE NOCASE, display_name TEXT NOT NULL,
         created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE IF NOT EXISTS note_group_aliases (alias TEXT PRIMARY KEY COLLATE NOCASE, group_name TEXT NOT NULL);
     """)
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
@@ -71,6 +72,7 @@ def init_db():
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source_key ON entries(source_key) WHERE source_key IS NOT NULL")
+    con.execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) SELECT lower(display_name),display_name FROM note_groups")
     con.execute("UPDATE entries SET category='note' WHERE category='action'")
     con.commit(); con.close()
 init_db()
@@ -236,36 +238,63 @@ def normalized_group_name(value):
     return value.upper() if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}",value) else None
 
 DIGIT_WORDS={"zero":"0","oh":"0","one":"1","two":"2","three":"3","four":"4","five":"5","six":"6","seven":"7","eight":"8","nine":"9"}
+NUMBER_UNITS={word:int(value) for word,value in DIGIT_WORDS.items() if word!="oh"}; NUMBER_UNITS["oh"]=0
+NUMBER_TENS={"ten":10,"eleven":11,"twelve":12,"thirteen":13,"fourteen":14,"fifteen":15,"sixteen":16,"seventeen":17,"eighteen":18,"nineteen":19,
+  "twenty":20,"thirty":30,"forty":40,"fifty":50,"sixty":60,"seventy":70,"eighty":80,"ninety":90}
 
-def canonical_group_phrase(value):
-    value=str(value).strip().rstrip(".!").strip(); direct=normalized_group_name(value)
-    if direct:return direct
-    tokens=value.lower().split(); number_at=next((i for i,token in enumerate(tokens) if token in DIGIT_WORDS or token.isdigit()),None)
-    if number_at is None or number_at==0:return None
-    prefix=tokens[:number_at]; numbers=tokens[number_at:]
-    if not all(token.isalpha() and token not in DIGIT_WORDS for token in prefix):return None
-    if not all(token in DIGIT_WORDS or token.isdigit() for token in numbers):return None
-    return normalized_group_name("".join(prefix)+"".join(DIGIT_WORDS.get(token,token) for token in numbers))
+def parse_spoken_number(tokens):
+    if not tokens:return None
+    if len(tokens)>1 and all(token in DIGIT_WORDS for token in tokens):return int("".join(DIGIT_WORDS[token] for token in tokens))
+    total=current=0
+    for token in tokens:
+        if token.isdigit():current+=int(token)
+        elif token in NUMBER_UNITS:current+=NUMBER_UNITS[token]
+        elif token in NUMBER_TENS:current+=NUMBER_TENS[token]
+        elif token=="hundred":current=max(current,1)*100
+        elif token=="thousand":total+=max(current,1)*1000; current=0
+        else:return None
+    return total+current
+
+def number_words(value):
+    value=int(value)
+    if value<10:return next(word for word,number in NUMBER_UNITS.items() if number==value and word!="oh")
+    if value<20:return next(word for word,number in NUMBER_TENS.items() if number==value)
+    if value<100:
+        tens=(value//10)*10; word=next(word for word,number in NUMBER_TENS.items() if number==tens)
+        return word+(" "+number_words(value%10) if value%10 else "")
+    if value<1000:return number_words(value//100)+" hundred"+(" "+number_words(value%100) if value%100 else "")
+    if value<1_000_000:return number_words(value//1000)+" thousand"+(" "+number_words(value%1000) if value%1000 else "")
+    return " ".join(number_words(int(digit)) for digit in str(value))
+
+def group_identity(value):
+    raw=re.sub(r"\s+"," ",str(value).strip().rstrip(".! ")).lower(); direct=normalized_group_name(raw)
+    prefix_words=[]; number=None
+    if direct:
+        match=re.fullmatch(r"([A-Za-z_-]+)(\d+)",direct)
+        if match:prefix_words=[match.group(1).lower()]; number=int(match.group(2))
+        else:return direct,{raw,direct.lower()}
+    else:
+        tokens=raw.replace("-"," ").split(); number_at=next((i for i,token in enumerate(tokens) if token.isdigit() or token in NUMBER_UNITS or token in NUMBER_TENS or token in {"hundred","thousand"}),None)
+        if number_at is None or number_at==0:return None,set()
+        prefix_words=tokens[:number_at]; number=parse_spoken_number(tokens[number_at:])
+        if number is None or not all(re.fullmatch(r"[a-z_]+",token) for token in prefix_words):return None,set()
+        direct=normalized_group_name("".join(prefix_words)+str(number))
+    if not direct:return None,set()
+    prefix=" ".join(prefix_words); digit_words=" ".join(number_words(int(digit)) for digit in str(number))
+    return direct,{raw,direct.lower(),f"{prefix} {number}",f"{prefix} {number_words(number)}",f"{prefix} {digit_words}"}
 
 def create_group_command(text):
     match=re.fullmatch(r"\s*create\s+(.+?)\s*",text,re.IGNORECASE)
-    return canonical_group_phrase(match.group(1)) if match else None
-
-def group_spoken_aliases(name):
-    match=re.fullmatch(r"([A-Za-z_-]+)(\d+)",name)
-    if not match:return []
-    prefix=match.group(1); spoken=" ".join(next(word for word,digit in DIGIT_WORDS.items() if digit==value and word!="oh") for value in match.group(2))
-    return [f"{prefix} {spoken}",f"{' '.join(prefix)} {spoken}"]
+    return group_identity(match.group(1)) if match else None
 
 def match_note_group(text):
     candidate=re.sub(r"^\s*add\s+to\s+","",text,count=1,flags=re.IGNORECASE)
-    groups=db().execute("SELECT display_name FROM note_groups WHERE archived=0 ORDER BY length(display_name) DESC").fetchall()
-    for row in groups:
-        aliases=[row["display_name"],*group_spoken_aliases(row["display_name"])]
-        for alias in aliases:
-            pattern=r"^\s*"+r"\s+".join(re.escape(part) for part in alias.split())+r"(?:\s*[:.,-]\s*|\s+)(.+)$"
-            match=re.match(pattern,candidate,re.IGNORECASE|re.DOTALL)
-            if match:return row["display_name"],match.group(1).strip()
+    aliases=db().execute("""SELECT a.alias,g.display_name FROM note_group_aliases a JOIN note_groups g ON g.name=a.group_name
+      WHERE g.archived=0 ORDER BY length(a.alias) DESC""").fetchall()
+    for row in aliases:
+        pattern=r"^\s*"+r"\s+".join(re.escape(part) for part in row["alias"].split())+r"(?:\s*[:.,-]\s*|\s+)(.+)$"
+        match=re.match(pattern,candidate,re.IGNORECASE|re.DOTALL)
+        if match:return row["display_name"],match.group(1).strip()
     return None,text
 
 def payload_from_request():
@@ -288,9 +317,10 @@ def store_entry(payload, upload=None, source="ring"):
     category,cleaned=voice_category(transcription)
     if explicit_category in VALID_CATEGORIES: category=explicit_category
     elif source=="ring": transcription=cleaned
-    group_to_create=create_group_command(transcription)
-    if group_to_create:
-        cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now())); db().commit()
+    group_command=create_group_command(transcription)
+    if group_command:
+        group_to_create,aliases=group_command; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
+        db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
         created=bool(cursor.rowcount); log_activity("info","group",f"{'Created' if created else 'Group already exists'} {group_to_create}",group_to_create)
         return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
     group_name,transcription=match_note_group(transcription)
@@ -493,6 +523,26 @@ def enable_local_user(username):
     username=username.strip().lower(); cur=db().execute("UPDATE local_users SET enabled=1 WHERE username=?",(username,)); db().commit()
     if not cur.rowcount:raise click.ClickException("Local user not found")
     click.echo(f"Enabled {username}")
+
+@app.cli.group("groups")
+def groups_cli(): """Manage voice note groups."""
+
+@groups_cli.command("list")
+def list_note_groups():
+    rows=db().execute("""SELECT g.display_name,count(e.id) AS entries FROM note_groups g LEFT JOIN entries e
+      ON e.group_name=g.display_name GROUP BY g.name ORDER BY g.display_name""").fetchall()
+    if not rows:click.echo("No note groups")
+    for row in rows:click.echo(f"{row['display_name']}\t{row['entries']} entries")
+
+@groups_cli.command("delete-empty")
+@click.option("--name",prompt=True)
+def delete_empty_note_group(name):
+    name=normalized_group_name(name)
+    if not name:raise click.ClickException("Invalid group name")
+    row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone()
+    if not row:raise click.ClickException("Note group not found")
+    if db().execute("SELECT count(*) FROM entries WHERE group_name=?",(row["display_name"],)).fetchone()[0]:raise click.ClickException("Group is not empty")
+    db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_groups WHERE name=?",(name,)); db().commit(); click.echo(f"Deleted empty group {row['display_name']}")
 @app.get("/")
 def index():return send_from_directory("static","index.html")
 @app.get("/<path:path>")

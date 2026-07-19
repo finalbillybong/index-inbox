@@ -186,6 +186,15 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(repeated.status_code,200)
         self.assertFalse(repeated.json["groupCreated"])
 
+    def test_natural_spoken_number_group_aliases(self):
+        headers={"X-Webhook-Secret": "test-webhook-secret"}
+        created=self.client.post("/webhook/index",json={"transcription":"Create Kingfisher sixty 5."},headers=headers)
+        self.assertEqual(created.json["group"],"KINGFISHER65")
+        spoken=self.client.post("/webhook/index",json={"transcription":"Kingfisher sixty five step height is seven hundred millimetres."},headers=headers)
+        digits=self.client.post("/webhook/index",json={"transcription":"Kingfisher 65 walkway length is 6154"},headers=headers)
+        self.assertEqual(spoken.json["group"],"KINGFISHER65")
+        self.assertEqual(digits.json["group"],"KINGFISHER65")
+
 
 if __name__ == "__main__":
     unittest.main()

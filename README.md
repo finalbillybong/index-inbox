@@ -266,7 +266,14 @@ Create a group explicitly with a recording containing only:
 Create PW154
 ```
 
-Spoken-digit transcription is also recognized, so `Create PW one five four` creates the canonical group `PW154`. Later captures beginning `PW one five four …` match the same group.
+Spoken-number transcription is also recognized. `Create PW one five four` creates `PW154`, while `Create Kingfisher sixty five` creates `KINGFISHER65`. Index Inbox stores spoken and numeric aliases, so later captures beginning `Kingfisher 65 …`, `Kingfisher sixty five …` or `Kingfisher six five …` match the same group.
+
+To inspect groups or remove an incorrectly transcribed group that has no entries:
+
+```bash
+docker exec index-inbox flask groups list
+docker exec -it index-inbox flask groups delete-empty
+```
 
 After that, a recording whose text begins with the group name is added to it:
 
