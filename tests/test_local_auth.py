@@ -86,6 +86,31 @@ class LocalAuthTests(unittest.TestCase):
         )
         self.assertEqual(with_csrf.status_code, 201)
 
+    def test_authenticated_audio_can_be_transcribed(self):
+        login = self.login()
+        with patch.object(self.module, "transcribe_upload", return_value={"transcription": "locally transcribed note", "language": "en", "duration": 1.5}):
+            response = self.client.post(
+                "/api/transcribe",
+                data={"audio": (io.BytesIO(b"browser-audio"), "recording.webm")},
+                headers={"Origin": "http://localhost", "X-CSRF-Token": login.json["csrfToken"]},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["transcription"], "locally transcribed note")
+
+    def test_audio_only_manual_capture_uses_local_transcription(self):
+        login = self.login()
+        with patch.object(self.module, "transcribe_upload", return_value={"transcription": "audio only note", "language": "en", "duration": 1.0}):
+            response = self.client.post(
+                "/api/manual",
+                data={"transcription": "", "category": "note", "recordedAt": "1784409957261", "audio": (io.BytesIO(b"browser-audio"), "recording.webm")},
+                headers={"Origin": "http://localhost", "X-CSRF-Token": login.json["csrfToken"]},
+            )
+        self.assertEqual(response.status_code, 201)
+        with self.module.app.app_context():
+            row = self.module.db().execute("SELECT transcription,audio_path FROM entries WHERE id=?", (response.json["id"],)).fetchone()
+        self.assertEqual(row["transcription"], "audio only note")
+        self.assertTrue(row["audio_path"].endswith(".webm"))
+
     def test_wrong_origin_is_rejected(self):
         response = self.client.post(
             "/auth/login",

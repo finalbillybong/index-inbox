@@ -1,4 +1,4 @@
-import csv, hashlib, io, ipaddress, json, os, re, secrets, sqlite3, tempfile, urllib.request, uuid, zipfile
+import csv, hashlib, io, ipaddress, json, os, re, secrets, sqlite3, tempfile, threading, urllib.request, uuid, zipfile
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
@@ -33,10 +33,17 @@ PASSWORD_HASHER = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
 DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash("index-inbox-dummy-password")
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_MB", "25")) * 1024 * 1024
 BACKUP_HOOK_URL = os.getenv("BACKUP_HOOK_URL", "")
+TRANSCRIPTION_ENABLED = os.getenv("TRANSCRIPTION_ENABLED", "true").lower() == "true"
+TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "tiny.en").strip()
+TRANSCRIPTION_LANGUAGE = os.getenv("TRANSCRIPTION_LANGUAGE", "en").strip() or None
+TRANSCRIPTION_THREADS = max(int(os.getenv("TRANSCRIPTION_THREADS", "4")), 1)
+TRANSCRIPTION_MODEL_DIR = DATA_DIR / "models"
+_TRANSCRIPTION_MODEL = None
+_TRANSCRIPTION_LOCK = threading.Lock()
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
 CAPTURE_EVENT_KINDS = {"capture_standalone", "capture_grouped", "group_created", "group_exists",
   "group_unrecognized", "webhook_rejected", "ingest_error"}
-DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True); BACKUP_DIR.mkdir(parents=True,exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True); BACKUP_DIR.mkdir(parents=True,exist_ok=True); TRANSCRIPTION_MODEL_DIR.mkdir(parents=True,exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
 if AUTH_PROVIDER == "firebase" and PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
 
@@ -359,6 +366,29 @@ def payload_from_request():
         except Exception: payload = {"raw": request.data.decode("utf-8", errors="replace")}
     return payload or {}
 
+def transcribe_audio(path):
+    global _TRANSCRIPTION_MODEL
+    if not TRANSCRIPTION_ENABLED:raise RuntimeError("Local transcription is disabled")
+    with _TRANSCRIPTION_LOCK:
+        if _TRANSCRIPTION_MODEL is None:
+            from faster_whisper import WhisperModel
+            _TRANSCRIPTION_MODEL=WhisperModel(TRANSCRIPTION_MODEL,device="cpu",compute_type="int8",cpu_threads=TRANSCRIPTION_THREADS,download_root=str(TRANSCRIPTION_MODEL_DIR))
+        segments,info=_TRANSCRIPTION_MODEL.transcribe(str(path),language=TRANSCRIPTION_LANGUAGE,beam_size=1,vad_filter=True,condition_on_previous_text=False)
+        text=" ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+    if not text:raise ValueError("No speech was detected in the recording")
+    return {"transcription":text,"language":getattr(info,"language",TRANSCRIPTION_LANGUAGE),"duration":getattr(info,"duration",None)}
+
+def transcribe_upload(upload):
+    if not upload or not upload.filename:raise ValueError("An audio file is required")
+    if upload.mimetype and not upload.mimetype.startswith("audio/"):raise ValueError("The uploaded file is not recognized as audio")
+    suffix=Path(upload.filename).suffix.lower()[:10] or ".webm"
+    handle=tempfile.NamedTemporaryFile(prefix="index-transcribe-",suffix=suffix,delete=False); path=Path(handle.name); handle.close()
+    try:
+        upload.stream.seek(0); upload.save(path); upload.stream.seek(0)
+        if not path.stat().st_size:raise ValueError("The audio recording is empty")
+        return transcribe_audio(path)
+    finally:path.unlink(missing_ok=True)
+
 def store_entry(payload, upload=None, source="ring"):
     entry_id = str(uuid.uuid4()); recorded = normalize_timestamp(first(payload,("recorded_at","recordedAt","timestamp","created_at"),None))
     transcription = first(payload,("transcription","transcript","text","content","note")); trigger = first(payload,("trigger","trigger_type","triggerType","mode","click_type"),source)
@@ -594,11 +624,23 @@ def audio(entry_id):
     if not row or not row["audio_path"]:return jsonify(error="Audio not found"),404
     return send_file(AUDIO_DIR/row["audio_path"],mimetype=row["audio_mime"],download_name=row["audio_path"])
 
+@app.post("/api/transcribe")
+@api_auth
+def transcribe():
+    try:
+        upload=next((request.files[key] for key in request.files if request.files[key].filename),None)
+        return jsonify(ok=True,**transcribe_upload(upload))
+    except (ValueError,RuntimeError) as error:return jsonify(error=str(error)),400
+    except Exception as error:
+        log_activity("error","transcription_error","A manual recording could not be transcribed",str(error)); return jsonify(error="Local transcription failed. Check the server logs."),500
+
 @app.post("/api/manual")
 @api_auth
 def manual():
     try:
-        payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None); result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+        payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
+        if upload and not first(payload,("transcription","transcript","text","content","note")):payload["transcription"]=transcribe_upload(upload)["transcription"]
+        result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
     except Exception as error:
         log_activity("error","ingest_error","A manual capture could not be stored",str(error)); return jsonify(error="Manual capture failed"),500
 
@@ -620,7 +662,7 @@ def changes():
 
 @app.errorhandler(413)
 def capture_too_large(_error):
-    if request.path in {"/webhook/index","/api/manual"}:log_activity("error","ingest_error","A capture exceeded the upload size limit")
+    if request.path in {"/webhook/index","/api/manual","/api/transcribe"}:log_activity("error","ingest_error","A capture exceeded the upload size limit")
     return jsonify(error="Capture exceeds the configured upload size limit"),413
 
 @app.get("/api/status")
@@ -629,7 +671,7 @@ def status():
     count=db().execute("SELECT count(*) FROM entries").fetchone()[0]; audio_count=db().execute("SELECT count(*) FROM entries WHERE audio_path IS NOT NULL").fetchone()[0]
     audio_bytes=sum(p.stat().st_size for p in AUDIO_DIR.iterdir() if p.is_file()); db_bytes=DB_PATH.stat().st_size if DB_PATH.exists() else 0
     backup=db().execute("SELECT * FROM backup_runs ORDER BY requested_at DESC LIMIT 1").fetchone(); latest=db().execute("SELECT * FROM backup_runs WHERE status='success' ORDER BY completed_at DESC LIMIT 1").fetchone()
-    return jsonify(entries=count,audioEntries=audio_count,audioBytes=audio_bytes,databaseBytes=db_bytes,lastBackupHook=BACKUP_HOOK_URL!="",trustedProxyHops=TRUSTED_PROXY_HOPS,lastBackup=dict(backup) if backup else None,latestVerifiedBackup=dict(latest) if latest else None)
+    return jsonify(entries=count,audioEntries=audio_count,audioBytes=audio_bytes,databaseBytes=db_bytes,lastBackupHook=BACKUP_HOOK_URL!="",trustedProxyHops=TRUSTED_PROXY_HOPS,lastBackup=dict(backup) if backup else None,latestVerifiedBackup=dict(latest) if latest else None,transcriptionEnabled=TRANSCRIPTION_ENABLED,transcriptionModel=TRANSCRIPTION_MODEL)
 
 def export_rows(): return [dict(r) for r in db().execute("SELECT * FROM entries ORDER BY created_at DESC")]
 

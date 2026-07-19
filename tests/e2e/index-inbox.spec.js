@@ -30,7 +30,7 @@ test.describe.serial('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.0.0');
+    await expect(page.locator('.version')).toHaveText('v1.1.0');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
@@ -88,6 +88,39 @@ test.describe.serial('Index Inbox browser flows', () => {
     await expect(page.locator('#info-dialog')).toBeVisible();
     await expect(page.locator('#info-dialog')).toHaveCSS('width', '390px');
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' }).getByRole('button', { name: 'Timeline' })).toBeVisible();
+  });
+
+  test('browser audio recording is previewed and transcribed', async ({ page }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'mediaDevices', {
+        configurable: true,
+        value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) }
+      });
+      class FakeMediaRecorder {
+        static isTypeSupported() { return true; }
+        constructor(stream, options = {}) { this.stream = stream; this.mimeType = options.mimeType || 'audio/webm'; this.state = 'inactive'; }
+        start() { this.state = 'recording'; }
+        stop() {
+          this.state = 'inactive';
+          this.ondataavailable?.({ data: new Blob(['recorded-audio'], { type: this.mimeType }) });
+          this.onstop?.();
+        }
+      }
+      Object.defineProperty(window, 'MediaRecorder', { configurable: true, value: FakeMediaRecorder });
+    });
+    await page.route('**/api/transcribe', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ ok: true, transcription: 'locally transcribed browser audio', language: 'en', duration: 1 })
+    }));
+    await login(page);
+    await page.locator('#capture').click();
+    await page.locator('#record').click();
+    await expect(page.locator('#record-status')).toContainText('Recording');
+    await page.locator('#record').click();
+    await expect(page.locator('#record-preview')).toBeVisible();
+    await expect(page.locator('#manual-text')).toHaveValue('locally transcribed browser audio');
+    await expect(page.locator('#record-status')).toContainText('Transcription ready');
   });
 
   test('mobile header and storage actions do not overlap', async ({ page }) => {

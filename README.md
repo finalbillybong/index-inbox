@@ -20,6 +20,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - JSON, Markdown and ZIP/audio exports
 - Verified restorable backups with manifests, status, retention, and optional external hook
 - Installable responsive PWA with manual text/audio capture
+- CPU-local transcription of browser recordings with editable previews
 - Cached recent entries and mobile share-target support
 
 ## Architecture
@@ -114,8 +115,29 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 | `INDEX_DATA_PATH` | Yes | Persistent host directory for SQLite and audio |
 | `FIREBASE_CREDENTIALS_PATH` | Firebase | Host path to the service-account JSON file |
 | `BACKUP_HOOK_URL` | No | Automation endpoint called from the backup control |
+| `TRANSCRIPTION_ENABLED` | No | Enable server-local transcription of browser recordings; defaults to `true` |
+| `TRANSCRIPTION_MODEL` | No | faster-whisper model name; defaults to `tiny.en` |
+| `TRANSCRIPTION_LANGUAGE` | No | Language code used for transcription; defaults to `en`, or leave empty for detection |
+| `TRANSCRIPTION_THREADS` | No | CPU threads available to the transcription model; defaults to `4` |
 
 `FIREBASE_API_KEY` is browser configuration and is not treated as a server secret. The service-account JSON is sensitive and must never be committed, placed in the web root or included in a container image.
+
+## Browser audio capture and local transcription
+
+The **Capture → Record audio** control records in a browser-supported Opus format, uploads the recording through the authenticated application API, and transcribes it on the Index Inbox server with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). The generated text is shown in the capture form for editing before the note is saved. The recording is stored alongside the note when you press **Save**.
+
+The default `tiny.en` model is intended for short English notes and runs on a CPU using INT8 inference. No GPU is required. The first transcription downloads the model into `INDEX_DATA_PATH/models`; later transcriptions reuse that local copy. Choose `base.en` or `small.en` with `TRANSCRIPTION_MODEL` for potentially better accuracy at the cost of more memory and slower CPU transcription.
+
+```dotenv
+TRANSCRIPTION_ENABLED=true
+TRANSCRIPTION_MODEL=tiny.en
+TRANSCRIPTION_LANGUAGE=en
+TRANSCRIPTION_THREADS=4
+```
+
+Microphone access requires HTTPS or a browser-trusted localhost origin. After deploying an update, allow microphone permission for the Index Inbox hostname. On hardened mobile operating systems, both the browser app and the website must have microphone access. If transcription fails, the recorded audio can still be saved; Index Inbox retries transcription server-side when an audio-only capture is submitted.
+
+Once the model has been downloaded, audio transcription occurs inside the Index Inbox container. The initial model download contacts the model host, but recordings are not sent there.
 
 ## Local authentication setup
 
