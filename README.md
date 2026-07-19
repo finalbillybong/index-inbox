@@ -303,6 +303,15 @@ Each addition remains an independent stored entry with its original timestamp, a
 
 Use **Manage groups** in the web interface to remove empty or populated groups. Removing a group never deletes its entries or audio; existing additions become standalone notes after confirmation.
 
+The group manager also supports:
+
+- **Rename** — updates every assigned entry atomically and retains the old name as a spoken alias.
+- **Archive** — closes the group so new voice captures no longer match it while preserving its entries and aliases.
+- **Reopen** — makes an archived group available for voice matching and manual assignment again.
+- **Aliases** — lists the phrases that match a group and allows additional spoken forms to be added or removed. Canonical group-name aliases cannot be removed, and aliases cannot be shared by different groups.
+
+Each note card includes a group selector. Choose an active group to assign or move the note, or choose **Standalone** to remove it from its current group. Archived groups remain visible on entries already assigned to them but cannot receive new manual assignments until reopened.
+
 Server administrators can also inspect groups or remove an incorrectly transcribed empty group:
 
 ```bash

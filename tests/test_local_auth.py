@@ -209,6 +209,63 @@ class LocalAuthTests(unittest.TestCase):
             row=self.module.db().execute("SELECT group_name FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
             self.assertIsNone(row["group_name"])
 
+    def test_group_rename_updates_entries_and_preserves_old_alias(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Rename12"},headers=webhook)
+        entry=self.client.post("/webhook/index",json={"transcription":"Rename12 original entry"},headers=webhook)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        renamed=self.client.patch("/api/groups/RENAME12",json={"name":"Renamed12"},headers=headers)
+        self.assertEqual(renamed.status_code,200)
+        self.assertEqual(renamed.json["name"],"RENAMED12")
+        old_alias=self.client.post("/webhook/index",json={"transcription":"Rename12 second entry"},headers=webhook)
+        self.assertEqual(old_alias.json["group"],"RENAMED12")
+        with self.module.app.app_context():
+            row=self.module.db().execute("SELECT group_name FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
+            self.assertEqual(row["group_name"],"RENAMED12")
+
+    def test_archive_stops_matching_and_reopen_restores_it(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Archive23"},headers=webhook)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        self.assertEqual(self.client.patch("/api/groups/ARCHIVE23",json={"archived":True},headers=headers).status_code,200)
+        standalone=self.client.post("/webhook/index",json={"transcription":"Archive23 should remain standalone"},headers=webhook)
+        self.assertIsNone(standalone.json["group"])
+        self.assertEqual(self.client.patch("/api/groups/ARCHIVE23",json={"archived":False},headers=headers).status_code,200)
+        grouped=self.client.post("/webhook/index",json={"transcription":"Archive23 should now group"},headers=webhook)
+        self.assertEqual(grouped.json["group"],"ARCHIVE23")
+
+    def test_alias_management_rejects_conflicts_and_canonical_removal(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Alias31"},headers=webhook)
+        self.client.post("/webhook/index",json={"transcription":"Create Alias32"},headers=webhook)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        added=self.client.post("/api/groups/ALIAS31/aliases",json={"alias":"first project"},headers=headers)
+        self.assertEqual(added.status_code,201)
+        matched=self.client.post("/webhook/index",json={"transcription":"First project alias matching works"},headers=webhook)
+        self.assertEqual(matched.json["group"],"ALIAS31")
+        conflict=self.client.post("/api/groups/ALIAS32/aliases",json={"alias":"first project"},headers=headers)
+        self.assertEqual(conflict.status_code,409)
+        canonical=self.client.delete("/api/groups/ALIAS31/aliases",json={"alias":"alias31"},headers=headers)
+        self.assertEqual(canonical.status_code,409)
+        removed=self.client.delete("/api/groups/ALIAS31/aliases",json={"alias":"first project"},headers=headers)
+        self.assertEqual(removed.status_code,200)
+
+    def test_manual_group_assignment_move_and_unassign(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Move41"},headers=webhook)
+        self.client.post("/webhook/index",json={"transcription":"Create Move42"},headers=webhook)
+        entry=self.client.post("/webhook/index",json={"transcription":"standalone assignment test"},headers=webhook)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        self.assertEqual(self.client.patch(f"/api/entries/{entry.json['id']}",json={"group_name":"MOVE41"},headers=headers).status_code,200)
+        self.assertEqual(self.client.patch(f"/api/entries/{entry.json['id']}",json={"group_name":"MOVE42"},headers=headers).status_code,200)
+        self.client.patch("/api/groups/MOVE41",json={"archived":True},headers=headers)
+        archived=self.client.patch(f"/api/entries/{entry.json['id']}",json={"group_name":"MOVE41"},headers=headers)
+        self.assertEqual(archived.status_code,400)
+        self.assertEqual(self.client.patch(f"/api/entries/{entry.json['id']}",json={"group_name":None},headers=headers).status_code,200)
+        with self.module.app.app_context():
+            row=self.module.db().execute("SELECT group_name FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
+            self.assertIsNone(row["group_name"])
+
 
 if __name__ == "__main__":
     unittest.main()
