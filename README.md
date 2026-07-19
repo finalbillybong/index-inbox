@@ -307,7 +307,7 @@ Use **Manage groups** in the web interface to remove empty or populated groups. 
 
 The group manager also supports:
 
-- **Timeline** — opens the complete group history from oldest to newest, including editable transcription, tags, category, and any stored audio.
+- **Timeline** — opens the complete group history from oldest to newest, including editable transcription, tags, category, and any stored audio. Pending edits finish saving before the timeline closes, then the main inbox reloads to show them.
 - **Rename** — updates every assigned entry atomically and retains the old name as a spoken alias.
 - **Archive** — closes the group so new voice captures no longer match it while preserving its entries and aliases.
 - **Reopen** — makes an archived group available for voice matching and manual assignment again.
