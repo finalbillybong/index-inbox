@@ -11,7 +11,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - Retry deduplication and delivery activity history
 - Editable transcriptions, tags, categories, starring and archiving
 - Explicit voice-created note groups with combined presentation
-- Automatic background refresh for new webhook captures
+- Automatic background refresh with live, dismissible capture notices
 - Search, filters, pagination and bulk actions
 - Original webhook payload inspection
 - Audio playback, speed controls, downloads and retention cleanup
@@ -298,6 +298,8 @@ Group names may contain letters, numbers, hyphens and underscores, must be 1–3
 ### Display and automatic updates
 
 Each addition remains an independent stored entry with its original timestamp, audio and webhook payload, while the inbox presents entries from the same group together. Use the group filter to focus on one group. New webhook captures and groups appear automatically within about five seconds; automatic refresh pauses while a note is being edited or a dialog is open.
+
+The browser shows a dismissible notice when it receives a standalone note, adds a note to a group, creates a group, sees a repeated create command, cannot recognize a create command, rejects a webhook, or fails to store a capture. Notices are deduplicated by activity ID and disappear after ten seconds. They contain only a generic result and, where relevant, the canonical group name—never the note transcription or original payload.
 
 ### Remove a group
 

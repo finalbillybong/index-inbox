@@ -29,6 +29,8 @@ DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash("index-inbox-dummy-password")
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_MB", "25")) * 1024 * 1024
 BACKUP_HOOK_URL = os.getenv("BACKUP_HOOK_URL", "")
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
+CAPTURE_EVENT_KINDS = {"capture_standalone", "capture_grouped", "group_created", "group_exists",
+  "group_unrecognized", "webhook_rejected", "ingest_error"}
 DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
 if AUTH_PROVIDER == "firebase" and PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
@@ -289,7 +291,9 @@ def group_identity(value):
 
 def create_group_command(text):
     match=re.fullmatch(r"\s*create\s+(.+?)\s*",text,re.IGNORECASE)
-    return group_identity(match.group(1)) if match else None
+    if not match:return None
+    identity=group_identity(match.group(1))
+    return identity if identity[0] else None
 
 def match_note_group(text):
     candidate=re.sub(r"^\s*add\s+to\s+","",text,count=1,flags=re.IGNORECASE)
@@ -321,11 +325,11 @@ def store_entry(payload, upload=None, source="ring"):
     category,cleaned=voice_category(transcription)
     if explicit_category in VALID_CATEGORIES: category=explicit_category
     elif source=="ring": transcription=cleaned
-    group_command=create_group_command(transcription)
+    group_command=create_group_command(transcription); unrecognized_group_command=bool(re.match(r"^\s*create\b",transcription,re.IGNORECASE)) and not group_command
     if group_command:
         group_to_create,aliases=group_command; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
         db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
-        created=bool(cursor.rowcount); log_activity("info","group",f"{'Created' if created else 'Group already exists'} {group_to_create}",group_to_create)
+        created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created group' if created else 'Group already exists:'} {group_to_create}",group_to_create)
         return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
     group_name,transcription=match_note_group(transcription)
     audio_path=audio_mime=None
@@ -333,8 +337,13 @@ def store_entry(payload, upload=None, source="ring"):
         suffix=Path(upload.filename).suffix.lower()[:10] or ".bin"; audio_path=f"{entry_id}{suffix}"; audio_mime=upload.mimetype or "application/octet-stream"; upload.save(AUDIO_DIR/audio_path)
     db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name)); db().commit()
-    message=f"Captured {source} entry"+(f" for {group_name}" if group_name else "")
-    log_activity("info","ingest",message,entry_id); return {"id":entry_id,"created":True,"duplicate":False,"group":group_name}
+    if unrecognized_group_command:
+        log_activity("warning","group_unrecognized","Could not create a group from that command",entry_id)
+    elif group_name:
+        log_activity("info","capture_grouped",f"Added a note to {group_name}",entry_id)
+    else:
+        log_activity("info","capture_standalone","Added a standalone note",entry_id)
+    return {"id":entry_id,"created":True,"duplicate":False,"group":group_name}
 
 @app.get("/health")
 def health():
@@ -344,9 +353,12 @@ def health():
 @app.post("/webhook/index")
 def ingest():
     if not webhook_authorized():
-        log_activity("warning","auth","Rejected webhook authentication",request.remote_addr or ""); return jsonify(error="Invalid webhook secret"),401
-    payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
-    result=store_entry(payload,upload); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+        log_activity("warning","webhook_rejected","Rejected a webhook with invalid authentication",request.remote_addr or ""); return jsonify(error="Invalid webhook secret"),401
+    try:
+        payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
+        result=store_entry(payload,upload); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+    except Exception as error:
+        log_activity("error","ingest_error","A webhook could not be stored",str(error)); return jsonify(error="Webhook ingestion failed"),500
 
 @app.get("/api/groups")
 @api_auth
@@ -491,7 +503,10 @@ def audio(entry_id):
 @app.post("/api/manual")
 @api_auth
 def manual():
-    payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None); result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+    try:
+        payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None); result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+    except Exception as error:
+        log_activity("error","ingest_error","A manual capture could not be stored",str(error)); return jsonify(error="Manual capture failed"),500
 
 @app.get("/api/activity")
 @api_auth
@@ -499,7 +514,20 @@ def activity(): return jsonify([dict(r) for r in db().execute("SELECT * FROM act
 
 @app.get("/api/changes")
 @api_auth
-def changes():return jsonify(sequence=db().execute("SELECT coalesce(max(id),0) FROM activity").fetchone()[0])
+def changes():
+    latest=db().execute("SELECT coalesce(max(id),0) FROM activity").fetchone()[0]
+    if "since" not in request.args:return jsonify(sequence=latest,events=[])
+    try:since=max(int(request.args["since"]),0)
+    except ValueError:return jsonify(error="since must be a non-negative integer"),400
+    placeholders=",".join("?" for _ in CAPTURE_EVENT_KINDS)
+    rows=db().execute(f"SELECT id,created_at,level,kind,message FROM activity WHERE id>? AND kind IN ({placeholders}) ORDER BY id LIMIT 50",(since,*sorted(CAPTURE_EVENT_KINDS))).fetchall()
+    sequence=rows[-1]["id"] if len(rows)==50 else latest
+    return jsonify(sequence=sequence,events=[dict(row) for row in rows])
+
+@app.errorhandler(413)
+def capture_too_large(_error):
+    if request.path in {"/webhook/index","/api/manual"}:log_activity("error","ingest_error","A capture exceeded the upload size limit")
+    return jsonify(error="Capture exceeds the configured upload size limit"),413
 
 @app.get("/api/status")
 @api_auth
