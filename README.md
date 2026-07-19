@@ -12,6 +12,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - Editable transcriptions, tags, categories, starring and archiving
 - Explicit voice-created note groups with combined presentation
 - Chronological group timelines with editing, audio, and group-scoped exports
+- Conservative, user-confirmed suggestions for near-matching group identifiers
 - Automatic background refresh with live, dismissible capture notices
 - Search, filters, pagination and bulk actions
 - Original webhook payload inspection
@@ -325,6 +326,19 @@ Open **Manage groups**, select **Timeline** for a group, and choose one of its e
 - **ZIP + audio** contains both formats plus every available audio file assigned to that group.
 
 Exports are scoped to the selected group. Empty and archived groups remain available, and exporting an empty group produces valid empty Markdown, JSON, or ZIP output.
+
+### Suggested grouping
+
+Index Inbox can suggest a group when a standalone note begins with a slightly misheard or mistyped group identifier. Open **Manage groups** and use **Review suggestions** to inspect them.
+
+Suggestions are deliberately conservative:
+
+- The identifier must appear at the beginning of the note.
+- Its numeric portion must exactly match an active group.
+- Only a small difference in the name portion is allowed.
+- Archived groups are never suggested.
+
+For example, if `SITELOG42` exists, a standalone note beginning `SITLOG42` may be suggested for it, while `SITLOG43` will not be. Nothing moves automatically. **Accept** assigns the note and removes the proposed identifier from its transcription; **Dismiss** permanently hides that entry/group suggestion. Neither action creates or learns a spoken alias.
 
 Server administrators can also inspect groups or remove an incorrectly transcribed empty group:
 
