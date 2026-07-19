@@ -6,7 +6,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 
 - [x] Phase 0 — Stabilize the baseline
 - [x] Phase 1 — Group lifecycle and manual organization
-- [ ] **Phase 2 — Live capture feedback (in progress)**
+- [x] Phase 2 — Live capture feedback
 - [ ] Phase 3 — Group timeline and per-group export
 - [ ] Phase 4 — Suggested grouping
 - [ ] Phase 5 — Cloudflare-aware client IP handling
@@ -41,7 +41,7 @@ Add typed, deduplicated browser notices for standalone captures, grouped capture
 - [x] Report new groups, repeated create commands, and unmatched create commands
 - [x] Report rejected webhooks and ingestion failures without exposing note content
 - [x] Add API tests, browser syntax checks, and documentation
-- [ ] Validate on Unraid
+- [x] Validate on Unraid
 
 ## Phase 3 — Group timeline and export
 
