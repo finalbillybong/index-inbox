@@ -267,23 +267,23 @@ Voice note groups combine related captures in the inbox without combining or ove
 Create a group with a recording containing only the command:
 
 ```text
-Create PW154
+Create Project42
 ```
 
 Afterward, begin a recording with that group name:
 
 ```text
-PW154 Steph height is 700
-PW154 walkway length is 6154
+PROJECT42 first site observation
+PROJECT42 second site observation
 ```
 
 The more conversational explicit form also works:
 
 ```text
-Add to PW154: walkway width is 900
+Add to PROJECT42: follow-up observation
 ```
 
-Group matching is case-insensitive and only occurs at the beginning of a capture, or after the explicit `Add to` phrase. A sentence such as `Ask whether PW154 is complete` therefore remains a standalone note.
+Group matching is case-insensitive and only occurs at the beginning of a capture, or after the explicit `Add to` phrase. A sentence such as `Ask whether PROJECT42 is complete` therefore remains a standalone note.
 
 ### Spoken numbers and aliases
 
@@ -291,8 +291,7 @@ Speech transcription may represent the same identifier in different ways. Index 
 
 | Spoken creation command | Displayed group | Accepted capture prefixes |
 | --- | --- | --- |
-| `Create PW one five four` | `PW154` | `PW154`, `PW one five four`, `PW one hundred fifty four` |
-| `Create Kingfisher sixty five` | `KINGFISHER65` | `Kingfisher 65`, `Kingfisher sixty five`, `Kingfisher six five` |
+| `Create Project four two` | `PROJECT42` | `Project42`, `Project four two`, `Project forty two` |
 
 Group names may contain letters, numbers, hyphens and underscores, must be 1–32 canonical characters, and are displayed in uppercase.
 
