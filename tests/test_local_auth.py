@@ -14,6 +14,8 @@ class LocalAuthTests(unittest.TestCase):
             "AUTH_PROVIDER": "local",
             "AUTH_COOKIE_SECURE": "false",
             "AUTH_EXPECTED_ORIGIN": "http://localhost",
+            "AUTH_ALLOWED_ORIGINS": "http://localhost,https://index.example.com",
+            "LOCAL_SETUP_TOKEN": "test-setup-token",
             "DATA_DIR": cls.temp_dir.name,
             "WEBHOOK_SECRET": "test-webhook-secret",
         })
@@ -87,6 +89,52 @@ class LocalAuthTests(unittest.TestCase):
             headers={"Origin": "https://evil.example"},
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_second_allowed_origin_is_accepted(self):
+        response = self.client.post(
+            "/auth/login",
+            json={"username": "owner", "password": "correct horse battery staple"},
+            headers={"Origin": "https://index.example.com"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_first_run_setup_requires_token_and_only_runs_once(self):
+        with self.module.app.app_context():
+            self.module.db().execute("DELETE FROM local_sessions")
+            self.module.db().execute("DELETE FROM local_users")
+            self.module.db().commit()
+        try:
+            status = self.client.get("/auth/session")
+            self.assertEqual(status.status_code, 401)
+            self.assertTrue(status.json["setupRequired"])
+            rejected = self.client.post(
+                "/auth/setup",
+                json={"setupToken": "wrong", "username": "first", "password": "a secure first password", "passwordConfirmation": "a secure first password"},
+                headers={"Origin": "http://localhost"},
+            )
+            self.assertEqual(rejected.status_code, 401)
+            created = self.client.post(
+                "/auth/setup",
+                json={"setupToken": "test-setup-token", "username": "first", "password": "a secure first password", "passwordConfirmation": "a secure first password"},
+                headers={"Origin": "http://localhost"},
+            )
+            self.assertEqual(created.status_code, 201)
+            second = self.client.post(
+                "/auth/setup",
+                json={"setupToken": "test-setup-token", "username": "other", "password": "another secure password", "passwordConfirmation": "another secure password"},
+                headers={"Origin": "http://localhost"},
+            )
+            self.assertEqual(second.status_code, 409)
+        finally:
+            with self.module.app.app_context():
+                self.module.db().execute("DELETE FROM local_sessions")
+                self.module.db().execute("DELETE FROM local_users")
+                stamp = self.module.now()
+                self.module.db().execute(
+                    "INSERT INTO local_users(username,password_hash,created_at,password_changed_at) VALUES(?,?,?,?)",
+                    ("owner", self.module.PASSWORD_HASHER.hash("correct horse battery staple"), stamp, stamp),
+                )
+                self.module.db().commit()
 
     def test_repeated_failures_are_rate_limited(self):
         for _ in range(5):

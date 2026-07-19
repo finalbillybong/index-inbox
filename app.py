@@ -18,6 +18,9 @@ ALLOWED_EMAILS = {x.strip().lower() for x in os.getenv("ALLOWED_EMAILS", "").spl
 REQUIRE_VERIFIED_EMAIL = os.getenv("REQUIRE_VERIFIED_EMAIL", "false").lower() == "true"
 AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true").lower() == "true"
 AUTH_EXPECTED_ORIGIN = os.getenv("AUTH_EXPECTED_ORIGIN", "").rstrip("/")
+AUTH_ORIGINS_VALUE = os.getenv("AUTH_ALLOWED_ORIGINS", "").strip() or AUTH_EXPECTED_ORIGIN
+AUTH_ALLOWED_ORIGINS = {x.strip().rstrip("/") for x in AUTH_ORIGINS_VALUE.split(",") if x.strip()}
+LOCAL_SETUP_TOKEN = os.getenv("LOCAL_SETUP_TOKEN", "")
 AUTH_SESSION_DAYS = max(int(os.getenv("AUTH_SESSION_DAYS", "30")), 1)
 AUTH_IDLE_DAYS = max(int(os.getenv("AUTH_IDLE_DAYS", "7")), 1)
 AUTH_COOKIE = "__Host-index_session" if AUTH_COOKIE_SECURE else "index_session"
@@ -77,8 +80,8 @@ def log_activity(level, kind, message, details=""):
 def request_origin_allowed():
     origin=request.headers.get("Origin")
     if not origin:return True
-    expected=AUTH_EXPECTED_ORIGIN or request.host_url.rstrip("/")
-    return secrets.compare_digest(origin.rstrip("/"),expected)
+    allowed=AUTH_ALLOWED_ORIGINS or {request.host_url.rstrip("/")}
+    return origin.rstrip("/") in allowed
 
 def session_token_hash(token): return hashlib.sha256(token.encode()).hexdigest()
 
@@ -123,6 +126,49 @@ def login_limited(username,source_ip):
     return db().execute("""SELECT count(*) FROM login_attempts WHERE successful=0 AND attempted_at>=?
       AND (username=? OR source_ip=?)""",(cutoff,username,source_ip)).fetchone()[0]>=5
 
+def record_login_attempt(username,source_ip,successful):
+    db().execute("INSERT INTO login_attempts(attempted_at,username,source_ip,successful) VALUES(?,?,?,?)",(now(),username,source_ip,int(successful)))
+    if successful:db().execute("DELETE FROM login_attempts WHERE successful=0 AND (username=? OR source_ip=?)",(username,source_ip))
+    db().commit()
+
+def create_local_session(user):
+    token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(32); created=now(); expires=(datetime.now(timezone.utc)+timedelta(days=AUTH_SESSION_DAYS)).isoformat()
+    db().execute("DELETE FROM local_sessions WHERE expires_at<=?",(created,)); db().execute("""INSERT INTO local_sessions
+      (token_hash,user_id,session_version,csrf_token,created_at,last_seen_at,expires_at) VALUES(?,?,?,?,?,?,?)""",
+      (session_token_hash(token),user["id"],user["session_version"],csrf,created,created,expires)); db().commit()
+    stale=db().execute("SELECT token_hash FROM local_sessions WHERE user_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 10",(user["id"],)).fetchall()
+    if stale:db().executemany("DELETE FROM local_sessions WHERE token_hash=?",((row["token_hash"],) for row in stale)); db().commit()
+    response=jsonify(authenticated=True,username=user["username"],csrfToken=csrf)
+    response.set_cookie(AUTH_COOKIE,token,secure=AUTH_COOKIE_SECURE,httponly=True,samesite="Lax",path="/",max_age=AUTH_SESSION_DAYS*86400)
+    return response
+
+def local_setup_required():return db().execute("SELECT count(*) FROM local_users").fetchone()[0]==0
+
+@app.post("/auth/setup")
+def local_setup():
+    if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
+    if not request_origin_allowed():return jsonify(error="Invalid request origin"),403
+    if not local_setup_required():return jsonify(error="Initial setup is already complete"),409
+    if not LOCAL_SETUP_TOKEN:return jsonify(error="Web setup is not enabled; create a user from the command line"),503
+    body=request.get_json(silent=True) or {}; supplied=str(body.get("setupToken","")); username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); confirmation=str(body.get("passwordConfirmation","")); source=request.remote_addr or ""
+    if login_limited("__setup__",source):return jsonify(error="Too many setup attempts; try again later"),429
+    token_valid=bool(supplied) and secrets.compare_digest(supplied,LOCAL_SETUP_TOKEN)
+    if not token_valid:record_login_attempt("__setup__",source,False); return jsonify(error="Invalid setup token"),401
+    if not username:return jsonify(error="Username is required"),400
+    if len(password)<12:return jsonify(error="Password must be at least 12 characters"),400
+    if len(password)>1024:return jsonify(error="Password is too long"),400
+    if password!=confirmation:return jsonify(error="Passwords do not match"),400
+    connection=db()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if connection.execute("SELECT count(*) FROM local_users").fetchone()[0]:connection.rollback(); return jsonify(error="Initial setup is already complete"),409
+        stamp=now(); password_hash=PASSWORD_HASHER.hash(password)
+        cursor=connection.execute("INSERT INTO local_users(username,password_hash,created_at,password_changed_at) VALUES(?,?,?,?)",(username,password_hash,stamp,stamp)); connection.commit()
+    except sqlite3.IntegrityError:connection.rollback(); return jsonify(error="Unable to create owner account"),409
+    record_login_attempt("__setup__",source,True)
+    user=connection.execute("SELECT * FROM local_users WHERE id=?",(cursor.lastrowid,)).fetchone()
+    return create_local_session(user),201
+
 @app.post("/auth/login")
 def local_login():
     if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
@@ -137,25 +183,15 @@ def local_login():
         try:PASSWORD_HASHER.verify(DUMMY_PASSWORD_HASH,password)
         except VerifyMismatchError:pass
     valid=bool(user and user["enabled"] and password_matches)
-    db().execute("INSERT INTO login_attempts(attempted_at,username,source_ip,successful) VALUES(?,?,?,?)",(now(),username,source,int(valid)))
-    if valid:db().execute("DELETE FROM login_attempts WHERE successful=0 AND (username=? OR source_ip=?)",(username,source))
-    db().commit()
+    record_login_attempt(username,source,valid)
     if not valid:return jsonify(error="Invalid username or password"),401
-    token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(32); created=now(); expires=(datetime.now(timezone.utc)+timedelta(days=AUTH_SESSION_DAYS)).isoformat()
-    db().execute("DELETE FROM local_sessions WHERE expires_at<=?",(created,)); db().execute("""INSERT INTO local_sessions
-      (token_hash,user_id,session_version,csrf_token,created_at,last_seen_at,expires_at) VALUES(?,?,?,?,?,?,?)""",
-      (session_token_hash(token),user["id"],user["session_version"],csrf,created,created,expires)); db().commit()
-    stale=db().execute("SELECT token_hash FROM local_sessions WHERE user_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 10",(user["id"],)).fetchall()
-    if stale:db().executemany("DELETE FROM local_sessions WHERE token_hash=?",((row["token_hash"],) for row in stale)); db().commit()
-    response=jsonify(authenticated=True,username=user["username"],csrfToken=csrf)
-    response.set_cookie(AUTH_COOKIE,token,secure=AUTH_COOKIE_SECURE,httponly=True,samesite="Lax",path="/",max_age=AUTH_SESSION_DAYS*86400)
-    return response
+    return create_local_session(user)
 
 @app.get("/auth/session")
 def local_session_status():
     if AUTH_PROVIDER!="local":return jsonify(authenticated=False,provider=AUTH_PROVIDER)
     session=local_user()
-    if not session:return jsonify(authenticated=False,provider="local"),401
+    if not session:return jsonify(authenticated=False,provider="local",setupRequired=local_setup_required(),setupAvailable=bool(LOCAL_SETUP_TOKEN)),401
     return jsonify(authenticated=True,provider="local",username=session["username"],csrfToken=session["csrf_token"])
 
 @app.post("/auth/logout")
