@@ -349,6 +349,16 @@ def ingest():
 def groups():return jsonify([dict(row) for row in db().execute("""SELECT g.display_name AS name,g.created_at,g.archived,count(e.id) AS entries
   FROM note_groups g LEFT JOIN entries e ON e.group_name=g.display_name GROUP BY g.name ORDER BY g.archived,g.display_name""")])
 
+@app.delete("/api/groups/<name>")
+@api_auth
+def delete_group(name):
+    name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
+    if not row:return jsonify(error="Group not found"),404
+    count=db().execute("SELECT count(*) FROM entries WHERE group_name=?",(row["display_name"],)).fetchone()[0]
+    if count and request.args.get("ungroup")!="true":return jsonify(error="Group contains entries",entries=count),409
+    db().execute("UPDATE entries SET group_name=NULL WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_groups WHERE name=?",(name,)); db().commit()
+    log_activity("info","group",f"Removed group {row['display_name']}; preserved {count} entries",row["display_name"]); return jsonify(ok=True,ungrouped=count)
+
 @app.get("/api/entries")
 @api_auth
 def entries():

@@ -292,6 +292,8 @@ Group names are case-insensitive and may contain letters, numbers, hyphens and u
 
 Each addition remains an independent stored entry with its original timestamp, audio and webhook payload, while the inbox presents entries from the same group together. Use the group filter to focus on one group. New webhook captures and groups appear automatically within about five seconds; automatic refresh pauses while a note is being edited or a dialog is open.
 
+Use **Manage groups** to remove a group. Removing a group never deletes its entries or audio; existing additions become standalone notes after confirmation.
+
 ## Data and backups
 
 `INDEX_DATA_PATH` contains:
