@@ -1,4 +1,4 @@
-import csv, hashlib, io, json, os, re, secrets, sqlite3, urllib.request, uuid, zipfile
+import csv, hashlib, io, ipaddress, json, os, re, secrets, sqlite3, urllib.request, uuid, zipfile
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
@@ -24,6 +24,10 @@ AUTH_ALLOWED_ORIGINS = {x.strip().rstrip("/") for x in AUTH_ORIGINS_VALUE.split(
 LOCAL_SETUP_TOKEN = os.getenv("LOCAL_SETUP_TOKEN", "")
 AUTH_SESSION_DAYS = max(int(os.getenv("AUTH_SESSION_DAYS", "30")), 1)
 AUTH_IDLE_DAYS = max(int(os.getenv("AUTH_IDLE_DAYS", "7")), 1)
+TRUSTED_PROXY_HOPS = max(int(os.getenv("TRUSTED_PROXY_HOPS", "0")), 0)
+try:TRUSTED_PROXY_NETWORKS=tuple(ipaddress.ip_network(value.strip(),strict=False) for value in os.getenv("TRUSTED_PROXY_CIDRS","").split(",") if value.strip())
+except ValueError as error:raise RuntimeError(f"Invalid TRUSTED_PROXY_CIDRS: {error}") from error
+if TRUSTED_PROXY_HOPS and not TRUSTED_PROXY_NETWORKS:raise RuntimeError("TRUSTED_PROXY_CIDRS is required when TRUSTED_PROXY_HOPS is greater than zero")
 AUTH_COOKIE = "__Host-index_session" if AUTH_COOKIE_SECURE else "index_session"
 PASSWORD_HASHER = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
 DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash("index-inbox-dummy-password")
@@ -63,7 +67,7 @@ def init_db():
         session_version INTEGER NOT NULL, csrf_token TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
         expires_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES local_users(id) ON DELETE CASCADE);
       CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, attempted_at TEXT NOT NULL,
-        username TEXT NOT NULL, source_ip TEXT NOT NULL, successful INTEGER NOT NULL DEFAULT 0);
+        username TEXT NOT NULL, source_ip TEXT NOT NULL, peer_ip TEXT NOT NULL DEFAULT '', successful INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username,source_ip,attempted_at);
       CREATE TABLE IF NOT EXISTS note_groups (name TEXT PRIMARY KEY COLLATE NOCASE, display_name TEXT NOT NULL,
         created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
@@ -76,6 +80,8 @@ def init_db():
       "archived":"INTEGER NOT NULL DEFAULT 0", "source_key":"TEXT", "group_name":"TEXT"}
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
+    login_columns={r[1] for r in con.execute("PRAGMA table_info(login_attempts)")}
+    if "peer_ip" not in login_columns:con.execute("ALTER TABLE login_attempts ADD COLUMN peer_ip TEXT NOT NULL DEFAULT ''")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source_key ON entries(source_key) WHERE source_key IS NOT NULL")
     con.execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) SELECT lower(display_name),display_name FROM note_groups")
     con.execute("UPDATE entries SET category='note' WHERE category='action'")
@@ -91,6 +97,21 @@ def request_origin_allowed():
     if not origin:return True
     allowed=AUTH_ALLOWED_ORIGINS or {request.host_url.rstrip("/")}
     return origin.rstrip("/") in allowed
+
+def request_client_addresses():
+    peer=request.remote_addr or ""
+    if not TRUSTED_PROXY_HOPS:return peer,peer
+    try:peer_address=ipaddress.ip_address(peer)
+    except ValueError:return peer,peer
+    if not any(peer_address in network for network in TRUSTED_PROXY_NETWORKS):return peer,peer
+    cloudflare=request.headers.get("CF-Connecting-IP","").strip()
+    if TRUSTED_PROXY_HOPS==1 and cloudflare:
+        try:return str(ipaddress.ip_address(cloudflare)),peer
+        except ValueError:return peer,peer
+    forwarded=[part.strip() for part in request.headers.get("X-Forwarded-For","").split(",") if part.strip()]
+    if len(forwarded)<TRUSTED_PROXY_HOPS:return peer,peer
+    try:return str(ipaddress.ip_address(forwarded[-TRUSTED_PROXY_HOPS])),peer
+    except ValueError:return peer,peer
 
 def session_token_hash(token): return hashlib.sha256(token.encode()).hexdigest()
 
@@ -135,8 +156,8 @@ def login_limited(username,source_ip):
     return db().execute("""SELECT count(*) FROM login_attempts WHERE successful=0 AND attempted_at>=?
       AND (username=? OR source_ip=?)""",(cutoff,username,source_ip)).fetchone()[0]>=5
 
-def record_login_attempt(username,source_ip,successful):
-    db().execute("INSERT INTO login_attempts(attempted_at,username,source_ip,successful) VALUES(?,?,?,?)",(now(),username,source_ip,int(successful)))
+def record_login_attempt(username,source_ip,successful,peer_ip=""):
+    db().execute("INSERT INTO login_attempts(attempted_at,username,source_ip,successful,peer_ip) VALUES(?,?,?,?,?)",(now(),username,source_ip,int(successful),peer_ip))
     if successful:db().execute("DELETE FROM login_attempts WHERE successful=0 AND (username=? OR source_ip=?)",(username,source_ip))
     db().commit()
 
@@ -159,10 +180,10 @@ def local_setup():
     if not request_origin_allowed():return jsonify(error="Invalid request origin"),403
     if not local_setup_required():return jsonify(error="Initial setup is already complete"),409
     if not LOCAL_SETUP_TOKEN:return jsonify(error="Web setup is not enabled; create a user from the command line"),503
-    body=request.get_json(silent=True) or {}; supplied=str(body.get("setupToken","")); username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); confirmation=str(body.get("passwordConfirmation","")); source=request.remote_addr or ""
+    body=request.get_json(silent=True) or {}; supplied=str(body.get("setupToken","")); username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); confirmation=str(body.get("passwordConfirmation","")); source,peer=request_client_addresses()
     if login_limited("__setup__",source):return jsonify(error="Too many setup attempts; try again later"),429
     token_valid=bool(supplied) and secrets.compare_digest(supplied,LOCAL_SETUP_TOKEN)
-    if not token_valid:record_login_attempt("__setup__",source,False); return jsonify(error="Invalid setup token"),401
+    if not token_valid:record_login_attempt("__setup__",source,False,peer); return jsonify(error="Invalid setup token"),401
     if not username:return jsonify(error="Username is required"),400
     if len(password)<12:return jsonify(error="Password must be at least 12 characters"),400
     if len(password)>1024:return jsonify(error="Password is too long"),400
@@ -174,7 +195,7 @@ def local_setup():
         stamp=now(); password_hash=PASSWORD_HASHER.hash(password)
         cursor=connection.execute("INSERT INTO local_users(username,password_hash,created_at,password_changed_at) VALUES(?,?,?,?)",(username,password_hash,stamp,stamp)); connection.commit()
     except sqlite3.IntegrityError:connection.rollback(); return jsonify(error="Unable to create owner account"),409
-    record_login_attempt("__setup__",source,True)
+    record_login_attempt("__setup__",source,True,peer)
     user=connection.execute("SELECT * FROM local_users WHERE id=?",(cursor.lastrowid,)).fetchone()
     return create_local_session(user),201
 
@@ -182,7 +203,7 @@ def local_setup():
 def local_login():
     if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
     if not request_origin_allowed():return jsonify(error="Invalid request origin"),403
-    body=request.get_json(silent=True) or {}; username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); source=request.remote_addr or ""
+    body=request.get_json(silent=True) or {}; username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); source,peer=request_client_addresses()
     if len(password)>1024:return jsonify(error="Invalid username or password"),401
     if login_limited(username,source):return jsonify(error="Too many login attempts; try again later"),429
     user=db().execute("SELECT * FROM local_users WHERE username=?",(username,)).fetchone(); password_matches=False
@@ -192,7 +213,7 @@ def local_login():
         try:PASSWORD_HASHER.verify(DUMMY_PASSWORD_HASH,password)
         except VerifyMismatchError:pass
     valid=bool(user and user["enabled"] and password_matches)
-    record_login_attempt(username,source,valid)
+    record_login_attempt(username,source,valid,peer)
     if not valid:return jsonify(error="Invalid username or password"),401
     return create_local_session(user)
 
@@ -377,7 +398,7 @@ def health():
 @app.post("/webhook/index")
 def ingest():
     if not webhook_authorized():
-        log_activity("warning","webhook_rejected","Rejected a webhook with invalid authentication",request.remote_addr or ""); return jsonify(error="Invalid webhook secret"),401
+        source,peer=request_client_addresses(); log_activity("warning","webhook_rejected","Rejected a webhook with invalid authentication",json.dumps({"client":source,"peer":peer})); return jsonify(error="Invalid webhook secret"),401
     try:
         payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
         result=store_entry(payload,upload); return jsonify(ok=True,**result),(201 if result["created"] else 200)
@@ -605,7 +626,7 @@ def capture_too_large(_error):
 def status():
     count=db().execute("SELECT count(*) FROM entries").fetchone()[0]; audio_count=db().execute("SELECT count(*) FROM entries WHERE audio_path IS NOT NULL").fetchone()[0]
     audio_bytes=sum(p.stat().st_size for p in AUDIO_DIR.iterdir() if p.is_file()); db_bytes=DB_PATH.stat().st_size if DB_PATH.exists() else 0
-    return jsonify(entries=count,audioEntries=audio_count,audioBytes=audio_bytes,databaseBytes=db_bytes,lastBackupHook=BACKUP_HOOK_URL!="")
+    return jsonify(entries=count,audioEntries=audio_count,audioBytes=audio_bytes,databaseBytes=db_bytes,lastBackupHook=BACKUP_HOOK_URL!="",trustedProxyHops=TRUSTED_PROXY_HOPS)
 
 def export_rows(): return [dict(r) for r in db().execute("SELECT * FROM entries ORDER BY created_at DESC")]
 
@@ -702,6 +723,12 @@ def list_local_users():
     rows=db().execute("SELECT username,enabled,created_at FROM local_users ORDER BY username").fetchall()
     if not rows:click.echo("No local users")
     for row in rows:click.echo(f"{row['username']}\t{'enabled' if row['enabled'] else 'disabled'}\t{row['created_at']}")
+
+@auth_cli.command("list-attempts")
+def list_login_attempts():
+    rows=db().execute("SELECT attempted_at,username,source_ip,peer_ip,successful FROM login_attempts ORDER BY id DESC LIMIT 20").fetchall()
+    if not rows:click.echo("No login attempts")
+    for row in rows:click.echo(f"{row['attempted_at']}\t{row['username']}\tclient={row['source_ip']}\tpeer={row['peer_ip']}\t{'success' if row['successful'] else 'failure'}")
 
 @auth_cli.command("disable-user")
 @click.option("--username",prompt=True)
