@@ -12,7 +12,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Phase 5 — Cloudflare-aware client IP handling
 - [x] Phase 6 — Backup status and restore verification
 - [x] Phase 7 — Playwright browser tests
-- [ ] **Phase 8 — Final Unraid regression and release (promotion in progress)**
+- [x] **Phase 8 — Final Unraid regression and release**
 
 ## Phase 1 — Group lifecycle and manual organization
 
@@ -116,5 +116,5 @@ Back up production, deploy the release candidate to Unraid, verify migrations an
 - [x] Verify database migrations, health, local authentication, and Cloudflare access
 - [x] Run the critical capture, grouping, timeline, export, and backup regression
 - [x] Verify rollback readiness and complete an isolated restore check
-- [ ] Confirm GitHub Actions and the release-candidate pull request are green
-- [ ] Promote the tested candidate to `v1.0.0` and tag the merge commit
+- [x] Confirm GitHub Actions and the release-candidate pull request are green
+- [x] Promote the tested candidate to `v1.0.0` and tag the merge commit
