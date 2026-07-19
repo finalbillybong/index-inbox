@@ -8,7 +8,7 @@ This file tracks the agreed implementation sequence. Each phase is developed on 
 - [x] Phase 1 — Group lifecycle and manual organization
 - [x] Phase 2 — Live capture feedback
 - [x] Phase 3 — Group timeline and per-group export
-- [ ] **Phase 4 — Suggested grouping (in progress)**
+- [x] Phase 4 — Suggested grouping
 - [ ] Phase 5 — Cloudflare-aware client IP handling
 - [ ] Phase 6 — Backup status and restore verification
 - [ ] Phase 7 — Playwright browser tests
@@ -65,7 +65,7 @@ Offer conservative, user-confirmed group suggestions for near-matching prefixes.
 - [x] Persist dismissals so rejected suggestions do not return
 - [x] Never create aliases from suggestions
 - [x] Add tests, UI documentation, and Unraid validation steps
-- [ ] Validate on Unraid
+- [x] Validate on Unraid
 
 ## Phase 5 — Cloudflare-aware client IP handling
 
