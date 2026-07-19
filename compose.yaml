@@ -1,0 +1,22 @@
+services:
+  index-inbox:
+    build: .
+    container_name: index-inbox
+    restart: unless-stopped
+    ports:
+      - "5050:8080"
+    environment:
+      DATA_DIR: /data
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET}
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
+      FIREBASE_API_KEY: ${FIREBASE_API_KEY}
+      FIREBASE_AUTH_DOMAIN: ${FIREBASE_AUTH_DOMAIN}
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/firebase-service-account.json
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+      REQUIRE_VERIFIED_EMAIL: ${REQUIRE_VERIFIED_EMAIL:-false}
+      TRUST_PROXY: "true"
+      MAX_AUDIO_MB: "25"
+      BACKUP_HOOK_URL: ${BACKUP_HOOK_URL:-}
+    volumes:
+      - ${INDEX_DATA_PATH}:/data
+      - ${FIREBASE_CREDENTIALS_PATH}:/run/secrets/firebase-service-account.json:ro
