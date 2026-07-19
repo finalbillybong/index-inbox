@@ -364,6 +364,47 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/groups/UNKNOWN999/timeline").status_code,404)
         self.assertEqual(self.client.get("/api/groups/UNKNOWN999/export/json").status_code,404)
 
+    def test_group_suggestion_requires_acceptance_and_does_not_learn_alias(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Suggestion eighty four"},headers=webhook)
+        entry=self.client.post("/webhook/index",json={"transcription":"Sugestion 84 misplaced observation"},headers=webhook)
+        self.assertIsNone(entry.json["group"])
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        suggestions=self.client.get("/api/group-suggestions").json
+        suggestion=next(item for item in suggestions if item["entryId"]==entry.json["id"])
+        self.assertEqual(suggestion["group"],"SUGGESTION84")
+        with self.module.app.app_context():before=self.module.db().execute("SELECT count(*) FROM note_group_aliases WHERE group_name='SUGGESTION84'").fetchone()[0]
+        accepted=self.client.post(f"/api/group-suggestions/{entry.json['id']}/accept",json={"group":"SUGGESTION84"},headers=headers)
+        self.assertEqual(accepted.status_code,200)
+        with self.module.app.app_context():
+            stored=self.module.db().execute("SELECT group_name,transcription FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
+            after=self.module.db().execute("SELECT count(*) FROM note_group_aliases WHERE group_name='SUGGESTION84'").fetchone()[0]
+        self.assertEqual((stored["group_name"],stored["transcription"]),("SUGGESTION84","misplaced observation"))
+        self.assertEqual(after,before)
+
+    def test_group_suggestion_dismissal_persists_and_number_must_match(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Review eighty five"},headers=webhook)
+        dismissible=self.client.post("/webhook/index",json={"transcription":"Revew 85 dismiss this"},headers=webhook)
+        different_number=self.client.post("/webhook/index",json={"transcription":"Revew 86 do not suggest"},headers=webhook)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        ids={item["entryId"] for item in self.client.get("/api/group-suggestions").json}
+        self.assertIn(dismissible.json["id"],ids)
+        self.assertNotIn(different_number.json["id"],ids)
+        dismissed=self.client.post(f"/api/group-suggestions/{dismissible.json['id']}/dismiss",json={"group":"REVIEW85"},headers=headers)
+        self.assertEqual(dismissed.status_code,200)
+        ids={item["entryId"] for item in self.client.get("/api/group-suggestions").json}
+        self.assertNotIn(dismissible.json["id"],ids)
+
+    def test_archived_groups_are_not_suggested(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Closed eighty seven"},headers=webhook)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"],"Content-Type":"application/json"}
+        self.client.patch("/api/groups/CLOSED87",json={"archived":True},headers=headers)
+        entry=self.client.post("/webhook/index",json={"transcription":"Clased 87 remain standalone"},headers=webhook)
+        ids={item["entryId"] for item in self.client.get("/api/group-suggestions").json}
+        self.assertNotIn(entry.json["id"],ids)
+
 
 if __name__ == "__main__":
     unittest.main()

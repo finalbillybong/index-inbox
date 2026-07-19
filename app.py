@@ -1,5 +1,6 @@
 import csv, hashlib, io, json, os, re, secrets, sqlite3, urllib.request, uuid, zipfile
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
 
@@ -67,6 +68,8 @@ def init_db():
       CREATE TABLE IF NOT EXISTS note_groups (name TEXT PRIMARY KEY COLLATE NOCASE, display_name TEXT NOT NULL,
         created_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS note_group_aliases (alias TEXT PRIMARY KEY COLLATE NOCASE, group_name TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS group_suggestion_dismissals (entry_id TEXT NOT NULL, group_name TEXT NOT NULL,
+        dismissed_at TEXT NOT NULL, PRIMARY KEY(entry_id,group_name));
     """)
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
@@ -305,6 +308,27 @@ def match_note_group(text):
         if match:return row["display_name"],match.group(1).strip()
     return None,text
 
+def leading_group_candidate(text):
+    tokens=re.sub(r"^\s*add\s+to\s+","",str(text),count=1,flags=re.IGNORECASE).strip().split()
+    best=None
+    for size in range(1,min(len(tokens),8)+1):
+        identity=group_identity(" ".join(tokens[:size]).rstrip(":,."))
+        if identity[0] and re.search(r"\d",identity[0]):best=(identity[0]," ".join(tokens[size:]).lstrip(":.,- "))
+    return best or (None,str(text))
+
+def suggested_group_for(text):
+    candidate,remainder=leading_group_candidate(text)
+    match=re.fullmatch(r"([A-Z_-]+)(\d+)",candidate or "")
+    if not match or not remainder:return None
+    candidate_name,candidate_number=match.groups(); best=None
+    for row in db().execute("SELECT display_name FROM note_groups WHERE archived=0"):
+        target=re.fullmatch(r"([A-Z_-]+)(\d+)",row["display_name"])
+        if not target or target.group(2)!=candidate_number or target.group(1)==candidate_name:continue
+        score=SequenceMatcher(None,candidate_name,target.group(1)).ratio()
+        if score>=0.8 and abs(len(candidate_name)-len(target.group(1)))<=2 and (best is None or score>best["score"]):
+            best={"group":row["display_name"],"candidate":candidate,"suggestedText":remainder,"score":round(score,3)}
+    return best
+
 def payload_from_request():
     payload = request.get_json(silent=True) or request.form.to_dict(flat=True)
     if not payload and request.data:
@@ -386,6 +410,7 @@ def update_group(name):
         if target!=current:
             connection.execute("UPDATE entries SET group_name=? WHERE group_name=?",(target,row["display_name"]))
             connection.execute("UPDATE note_group_aliases SET group_name=? WHERE group_name=?",(target,row["display_name"]))
+            connection.execute("UPDATE group_suggestion_dismissals SET group_name=? WHERE group_name=?",(target,row["display_name"]))
             connection.execute("UPDATE note_groups SET name=?,display_name=? WHERE name=?",(target,target,current))
             connection.execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",(target.lower(),target)); renamed=True
         connection.execute("UPDATE note_groups SET archived=? WHERE name=?",(archived,target)); connection.commit()
@@ -433,7 +458,7 @@ def delete_group(name):
     if not row:return jsonify(error="Group not found"),404
     count=db().execute("SELECT count(*) FROM entries WHERE group_name=?",(row["display_name"],)).fetchone()[0]
     if count and request.args.get("ungroup")!="true":return jsonify(error="Group contains entries",entries=count),409
-    db().execute("UPDATE entries SET group_name=NULL WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_groups WHERE name=?",(name,)); db().commit()
+    db().execute("UPDATE entries SET group_name=NULL WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM group_suggestion_dismissals WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_groups WHERE name=?",(name,)); db().commit()
     log_activity("info","group",f"Removed group {row['display_name']}; preserved {count} entries",row["display_name"]); return jsonify(ok=True,ungrouped=count)
 
 def find_group(name):
@@ -449,6 +474,38 @@ def group_timeline(name):
     group=find_group(name)
     if not group:return jsonify(error="Group not found"),404
     return jsonify(group=dict(group),items=group_entries(group["name"]))
+
+def suggestion_for_entry(entry):
+    suggestion=suggested_group_for(entry["transcription"])
+    if not suggestion:return None
+    dismissed=db().execute("SELECT 1 FROM group_suggestion_dismissals WHERE entry_id=? AND group_name=?",(entry["id"],suggestion["group"])).fetchone()
+    return None if dismissed else {"entryId":entry["id"],"transcription":entry["transcription"],"createdAt":entry["created_at"],**suggestion}
+
+@app.get("/api/group-suggestions")
+@api_auth
+def group_suggestions():
+    entries=db().execute("SELECT id,transcription,created_at FROM entries WHERE group_name IS NULL AND archived=0 ORDER BY created_at DESC LIMIT 200").fetchall()
+    return jsonify([suggestion for entry in entries if (suggestion:=suggestion_for_entry(entry))][:50])
+
+@app.post("/api/group-suggestions/<entry_id>/accept")
+@api_auth
+def accept_group_suggestion(entry_id):
+    entry=db().execute("SELECT id,transcription,created_at FROM entries WHERE id=? AND group_name IS NULL",(entry_id,)).fetchone()
+    suggestion=suggestion_for_entry(entry) if entry else None; requested=normalized_group_name((request.get_json(silent=True) or {}).get("group",""))
+    if not suggestion:return jsonify(error="Suggestion not found"),404
+    if requested!=suggestion["group"]:return jsonify(error="Suggestion no longer matches"),409
+    db().execute("UPDATE entries SET group_name=?,transcription=? WHERE id=?",(suggestion["group"],suggestion["suggestedText"],entry_id)); db().commit()
+    log_activity("info","group",f"Accepted suggestion for {suggestion['group']}",entry_id); return jsonify(ok=True,group=suggestion["group"])
+
+@app.post("/api/group-suggestions/<entry_id>/dismiss")
+@api_auth
+def dismiss_group_suggestion(entry_id):
+    entry=db().execute("SELECT id,transcription,created_at FROM entries WHERE id=? AND group_name IS NULL",(entry_id,)).fetchone()
+    suggestion=suggestion_for_entry(entry) if entry else None; requested=normalized_group_name((request.get_json(silent=True) or {}).get("group",""))
+    if not suggestion:return jsonify(error="Suggestion not found"),404
+    if requested!=suggestion["group"]:return jsonify(error="Suggestion no longer matches"),409
+    db().execute("INSERT OR REPLACE INTO group_suggestion_dismissals(entry_id,group_name,dismissed_at) VALUES(?,?,?)",(entry_id,suggestion["group"],now())); db().commit()
+    log_activity("info","group",f"Dismissed suggestion for {suggestion['group']}",entry_id); return jsonify(ok=True)
 
 @app.get("/api/entries")
 @api_auth
@@ -492,7 +549,7 @@ def bulk():
 def remove_entry(entry_id):
     row=db().execute("SELECT audio_path FROM entries WHERE id=?",(entry_id,)).fetchone()
     if not row:return False
-    db().execute("DELETE FROM entries WHERE id=?",(entry_id,)); db().commit()
+    db().execute("DELETE FROM group_suggestion_dismissals WHERE entry_id=?",(entry_id,)); db().execute("DELETE FROM entries WHERE id=?",(entry_id,)); db().commit()
     if row["audio_path"]:
         try:(AUDIO_DIR/row["audio_path"]).unlink(missing_ok=True)
         except OSError as error:log_activity("warning","cleanup","Audio cleanup failed",str(error))
