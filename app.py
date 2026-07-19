@@ -5,18 +5,30 @@ from pathlib import Path
 
 import firebase_admin
 from firebase_admin import auth
+import click
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from flask import Flask, Response, g, jsonify, request, send_file, send_from_directory
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data")); AUDIO_DIR = DATA_DIR / "audio"; DB_PATH = DATA_DIR / "index-inbox.sqlite3"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", ""); PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
+AUTH_PROVIDER = os.getenv("AUTH_PROVIDER", "firebase").strip().lower()
+if AUTH_PROVIDER not in {"firebase", "local"}: raise RuntimeError("AUTH_PROVIDER must be 'firebase' or 'local'")
 ALLOWED_EMAILS = {x.strip().lower() for x in os.getenv("ALLOWED_EMAILS", "").split(",") if x.strip()}
 REQUIRE_VERIFIED_EMAIL = os.getenv("REQUIRE_VERIFIED_EMAIL", "false").lower() == "true"
+AUTH_COOKIE_SECURE = os.getenv("AUTH_COOKIE_SECURE", "true").lower() == "true"
+AUTH_EXPECTED_ORIGIN = os.getenv("AUTH_EXPECTED_ORIGIN", "").rstrip("/")
+AUTH_SESSION_DAYS = max(int(os.getenv("AUTH_SESSION_DAYS", "30")), 1)
+AUTH_IDLE_DAYS = max(int(os.getenv("AUTH_IDLE_DAYS", "7")), 1)
+AUTH_COOKIE = "__Host-index_session" if AUTH_COOKIE_SECURE else "index_session"
+PASSWORD_HASHER = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
+DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash("index-inbox-dummy-password")
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_MB", "25")) * 1024 * 1024
 BACKUP_HOOK_URL = os.getenv("BACKUP_HOOK_URL", "")
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
 DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
-if PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
+if AUTH_PROVIDER == "firebase" and PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
 
 def db():
     if "db" not in g:
@@ -38,6 +50,15 @@ def init_db():
       CREATE TABLE IF NOT EXISTS activity (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
         level TEXT NOT NULL, kind TEXT NOT NULL, message TEXT NOT NULL, details TEXT NOT NULL DEFAULT '');
       CREATE INDEX IF NOT EXISTS idx_entries_created ON entries(created_at DESC);
+      CREATE TABLE IF NOT EXISTS local_users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, session_version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL, password_changed_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS local_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+        session_version INTEGER NOT NULL, csrf_token TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES local_users(id) ON DELETE CASCADE);
+      CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, attempted_at TEXT NOT NULL,
+        username TEXT NOT NULL, source_ip TEXT NOT NULL, successful INTEGER NOT NULL DEFAULT 0);
+      CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username,source_ip,attempted_at);
     """)
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
@@ -53,19 +74,99 @@ def now(): return datetime.now(timezone.utc).isoformat()
 def log_activity(level, kind, message, details=""):
     db().execute("INSERT INTO activity(created_at,level,kind,message,details) VALUES(?,?,?,?,?)", (now(),level,kind,message,details)); db().commit()
 
+def request_origin_allowed():
+    origin=request.headers.get("Origin")
+    if not origin:return True
+    expected=AUTH_EXPECTED_ORIGIN or request.host_url.rstrip("/")
+    return secrets.compare_digest(origin.rstrip("/"),expected)
+
+def session_token_hash(token): return hashlib.sha256(token.encode()).hexdigest()
+
+def local_user():
+    token=request.cookies.get(AUTH_COOKIE,"")
+    if not token:return None
+    row=db().execute("""SELECT s.*,u.username,u.enabled,u.session_version AS current_version FROM local_sessions s
+      JOIN local_users u ON u.id=s.user_id WHERE s.token_hash=?""",(session_token_hash(token),)).fetchone()
+    current=now(); idle_cutoff=(datetime.now(timezone.utc)-timedelta(days=AUTH_IDLE_DAYS)).isoformat()
+    if not row or not row["enabled"] or row["session_version"]!=row["current_version"] or row["expires_at"]<=current or row["last_seen_at"]<=idle_cutoff:
+        if row:db().execute("DELETE FROM local_sessions WHERE token_hash=?",(session_token_hash(token),)); db().commit()
+        return None
+    db().execute("UPDATE local_sessions SET last_seen_at=? WHERE token_hash=?",(current,row["token_hash"])); db().commit()
+    return row
+
 def api_auth(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
-        if not PROJECT_ID: return jsonify(error="FIREBASE_PROJECT_ID is not configured"), 503
-        header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer "): return jsonify(error="Missing Firebase bearer token"), 401
-        try: claims = auth.verify_id_token(header[7:], check_revoked=True)
-        except Exception: return jsonify(error="Invalid or expired Firebase token"), 401
-        email = claims.get("email", "").lower()
-        if REQUIRE_VERIFIED_EMAIL and not claims.get("email_verified"): return jsonify(error="Email address is not verified"), 403
-        if ALLOWED_EMAILS and email not in ALLOWED_EMAILS: return jsonify(error="This account is not allowed"), 403
-        g.user = claims; return fn(*args, **kwargs)
+        if AUTH_PROVIDER == "firebase":
+            if not PROJECT_ID:return jsonify(error="FIREBASE_PROJECT_ID is not configured"),503
+            header=request.headers.get("Authorization","")
+            if not header.startswith("Bearer "):return jsonify(error="Missing Firebase bearer token"),401
+            try:claims=auth.verify_id_token(header[7:],check_revoked=True)
+            except Exception:return jsonify(error="Invalid or expired Firebase token"),401
+            email=claims.get("email","").lower()
+            if REQUIRE_VERIFIED_EMAIL and not claims.get("email_verified"):return jsonify(error="Email address is not verified"),403
+            if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:return jsonify(error="This account is not allowed"),403
+            g.user={"id":claims.get("uid"),"username":email,"provider":"firebase","claims":claims}
+        else:
+            session=local_user()
+            if not session:return jsonify(error="Authentication required"),401
+            if request.method in {"POST","PUT","PATCH","DELETE"}:
+                supplied=request.headers.get("X-CSRF-Token","")
+                if not request_origin_allowed() or not supplied or not secrets.compare_digest(supplied,session["csrf_token"]):return jsonify(error="Invalid CSRF token"),403
+            g.user={"id":str(session["user_id"]),"username":session["username"],"provider":"local"}; g.local_session=session
+        return fn(*args,**kwargs)
     return wrapped
+
+def login_limited(username,source_ip):
+    cutoff=(datetime.now(timezone.utc)-timedelta(minutes=15)).isoformat()
+    db().execute("DELETE FROM login_attempts WHERE attempted_at<?",((datetime.now(timezone.utc)-timedelta(days=1)).isoformat(),)); db().commit()
+    return db().execute("""SELECT count(*) FROM login_attempts WHERE successful=0 AND attempted_at>=?
+      AND (username=? OR source_ip=?)""",(cutoff,username,source_ip)).fetchone()[0]>=5
+
+@app.post("/auth/login")
+def local_login():
+    if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
+    if not request_origin_allowed():return jsonify(error="Invalid request origin"),403
+    body=request.get_json(silent=True) or {}; username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); source=request.remote_addr or ""
+    if len(password)>1024:return jsonify(error="Invalid username or password"),401
+    if login_limited(username,source):return jsonify(error="Too many login attempts; try again later"),429
+    user=db().execute("SELECT * FROM local_users WHERE username=?",(username,)).fetchone(); password_matches=False
+    try:password_matches=bool(user and PASSWORD_HASHER.verify(user["password_hash"],password))
+    except (VerifyMismatchError,InvalidHashError):pass
+    if not user:
+        try:PASSWORD_HASHER.verify(DUMMY_PASSWORD_HASH,password)
+        except VerifyMismatchError:pass
+    valid=bool(user and user["enabled"] and password_matches)
+    db().execute("INSERT INTO login_attempts(attempted_at,username,source_ip,successful) VALUES(?,?,?,?)",(now(),username,source,int(valid)))
+    if valid:db().execute("DELETE FROM login_attempts WHERE successful=0 AND (username=? OR source_ip=?)",(username,source))
+    db().commit()
+    if not valid:return jsonify(error="Invalid username or password"),401
+    token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(32); created=now(); expires=(datetime.now(timezone.utc)+timedelta(days=AUTH_SESSION_DAYS)).isoformat()
+    db().execute("DELETE FROM local_sessions WHERE expires_at<=?",(created,)); db().execute("""INSERT INTO local_sessions
+      (token_hash,user_id,session_version,csrf_token,created_at,last_seen_at,expires_at) VALUES(?,?,?,?,?,?,?)""",
+      (session_token_hash(token),user["id"],user["session_version"],csrf,created,created,expires)); db().commit()
+    stale=db().execute("SELECT token_hash FROM local_sessions WHERE user_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 10",(user["id"],)).fetchall()
+    if stale:db().executemany("DELETE FROM local_sessions WHERE token_hash=?",((row["token_hash"],) for row in stale)); db().commit()
+    response=jsonify(authenticated=True,username=user["username"],csrfToken=csrf)
+    response.set_cookie(AUTH_COOKIE,token,secure=AUTH_COOKIE_SECURE,httponly=True,samesite="Lax",path="/",max_age=AUTH_SESSION_DAYS*86400)
+    return response
+
+@app.get("/auth/session")
+def local_session_status():
+    if AUTH_PROVIDER!="local":return jsonify(authenticated=False,provider=AUTH_PROVIDER)
+    session=local_user()
+    if not session:return jsonify(authenticated=False,provider="local"),401
+    return jsonify(authenticated=True,provider="local",username=session["username"],csrfToken=session["csrf_token"])
+
+@app.post("/auth/logout")
+def local_logout():
+    if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
+    session=local_user()
+    if session:
+        supplied=request.headers.get("X-CSRF-Token","")
+        if not request_origin_allowed() or not supplied or not secrets.compare_digest(supplied,session["csrf_token"]):return jsonify(error="Invalid CSRF token"),403
+        db().execute("DELETE FROM local_sessions WHERE token_hash=?",(session["token_hash"],)); db().commit()
+    response=jsonify(ok=True); response.delete_cookie(AUTH_COOKIE,path="/",secure=AUTH_COOKIE_SECURE,httponly=True,samesite="Lax"); return response
 
 def webhook_authorized():
     supplied = request.headers.get("X-Webhook-Secret", ""); bearer = request.headers.get("Authorization", "")
@@ -241,7 +342,66 @@ def backup_hook():
 
 @app.get("/config.js")
 def config_js():
-    config={"apiKey":os.getenv("FIREBASE_API_KEY",""),"authDomain":os.getenv("FIREBASE_AUTH_DOMAIN",""),"projectId":PROJECT_ID}; return Response(f"window.FIREBASE_CONFIG={json.dumps(config)};",mimetype="application/javascript")
+    config={"authProvider":AUTH_PROVIDER}
+    if AUTH_PROVIDER=="firebase":config["firebase"]={"apiKey":os.getenv("FIREBASE_API_KEY",""),"authDomain":os.getenv("FIREBASE_AUTH_DOMAIN",""),"projectId":PROJECT_ID}
+    return Response(f"window.INDEX_INBOX_CONFIG={json.dumps(config)};",mimetype="application/javascript",headers={"Cache-Control":"no-store"})
+
+@app.after_request
+def private_api_cache(response):
+    if request.path.startswith(("/api/","/auth/")):response.headers["Cache-Control"]="private, no-store"
+    return response
+
+@app.cli.group("auth")
+def auth_cli(): """Manage local Index Inbox accounts."""
+
+@auth_cli.command("create-user")
+@click.option("--username",prompt=True)
+def create_local_user(username):
+    username=username.strip().lower()
+    if not username:raise click.ClickException("Username cannot be empty")
+    password=click.prompt("Password",hide_input=True,confirmation_prompt=True)
+    if len(password)<12:raise click.ClickException("Password must be at least 12 characters")
+    stamp=now()
+    try:db().execute("INSERT INTO local_users(username,password_hash,created_at,password_changed_at) VALUES(?,?,?,?)",(username,PASSWORD_HASHER.hash(password),stamp,stamp)); db().commit()
+    except sqlite3.IntegrityError:raise click.ClickException("That username already exists")
+    click.echo(f"Created local user {username}")
+
+@auth_cli.command("change-password")
+@click.option("--username",prompt=True)
+def change_local_password(username):
+    username=username.strip().lower(); user=db().execute("SELECT id FROM local_users WHERE username=?",(username,)).fetchone()
+    if not user:raise click.ClickException("Local user not found")
+    password=click.prompt("New password",hide_input=True,confirmation_prompt=True)
+    if len(password)<12:raise click.ClickException("Password must be at least 12 characters")
+    db().execute("UPDATE local_users SET password_hash=?,password_changed_at=?,session_version=session_version+1 WHERE id=?",(PASSWORD_HASHER.hash(password),now(),user["id"])); db().execute("DELETE FROM local_sessions WHERE user_id=?",(user["id"],)); db().commit(); click.echo(f"Password changed and sessions revoked for {username}")
+
+@auth_cli.command("revoke-sessions")
+@click.option("--username",prompt=True)
+def revoke_local_sessions(username):
+    username=username.strip().lower(); user=db().execute("SELECT id FROM local_users WHERE username=?",(username,)).fetchone()
+    if not user:raise click.ClickException("Local user not found")
+    db().execute("UPDATE local_users SET session_version=session_version+1 WHERE id=?",(user["id"],)); db().execute("DELETE FROM local_sessions WHERE user_id=?",(user["id"],)); db().commit(); click.echo(f"Sessions revoked for {username}")
+
+@auth_cli.command("list-users")
+def list_local_users():
+    rows=db().execute("SELECT username,enabled,created_at FROM local_users ORDER BY username").fetchall()
+    if not rows:click.echo("No local users")
+    for row in rows:click.echo(f"{row['username']}\t{'enabled' if row['enabled'] else 'disabled'}\t{row['created_at']}")
+
+@auth_cli.command("disable-user")
+@click.option("--username",prompt=True)
+def disable_local_user(username):
+    username=username.strip().lower(); user=db().execute("SELECT id,enabled FROM local_users WHERE username=?",(username,)).fetchone()
+    if not user:raise click.ClickException("Local user not found")
+    if user["enabled"] and db().execute("SELECT count(*) FROM local_users WHERE enabled=1").fetchone()[0]<=1:raise click.ClickException("Cannot disable the final enabled local user")
+    db().execute("UPDATE local_users SET enabled=0,session_version=session_version+1 WHERE id=?",(user["id"],)); db().execute("DELETE FROM local_sessions WHERE user_id=?",(user["id"],)); db().commit(); click.echo(f"Disabled {username} and revoked its sessions")
+
+@auth_cli.command("enable-user")
+@click.option("--username",prompt=True)
+def enable_local_user(username):
+    username=username.strip().lower(); cur=db().execute("UPDATE local_users SET enabled=1 WHERE username=?",(username,)); db().commit()
+    if not cur.rowcount:raise click.ClickException("Local user not found")
+    click.echo(f"Enabled {username}")
 @app.get("/")
 def index():return send_from_directory("static","index.html")
 @app.get("/<path:path>")
