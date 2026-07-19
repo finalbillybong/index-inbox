@@ -13,6 +13,7 @@ ALLOWED_EMAILS = {x.strip().lower() for x in os.getenv("ALLOWED_EMAILS", "").spl
 REQUIRE_VERIFIED_EMAIL = os.getenv("REQUIRE_VERIFIED_EMAIL", "false").lower() == "true"
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_MB", "25")) * 1024 * 1024
 BACKUP_HOOK_URL = os.getenv("BACKUP_HOOK_URL", "")
+VALID_CATEGORIES = {"note", "task", "idea", "question"}
 DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
 if PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
@@ -44,6 +45,7 @@ def init_db():
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source_key ON entries(source_key) WHERE source_key IS NOT NULL")
+    con.execute("UPDATE entries SET category='note' WHERE category='action'")
     con.commit(); con.close()
 init_db()
 
@@ -86,8 +88,8 @@ def normalize_timestamp(value):
     except (ValueError, OverflowError, OSError): return text
 
 def voice_category(text):
-    aliases={"note":"note","idea":"idea","task":"task","todo":"task","to-do":"task","reminder":"task","question":"question","action":"action"}
-    match=re.match(r"^\s*(note|idea|task|todo|to-do|reminder|question|action)(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.IGNORECASE|re.DOTALL)
+    aliases={"note":"note","idea":"idea","task":"task","todo":"task","to-do":"task","reminder":"task","question":"question"}
+    match=re.match(r"^\s*(note|idea|task|todo|to-do|reminder|question)(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.IGNORECASE|re.DOTALL)
     return (aliases[match.group(1).lower()],match.group(2).strip()) if match else ("note",text)
 
 def payload_from_request():
@@ -111,7 +113,7 @@ def store_entry(payload, upload=None, source="ring"):
         suffix=Path(upload.filename).suffix.lower()[:10] or ".bin"; audio_path=f"{entry_id}{suffix}"; audio_mime=upload.mimetype or "application/octet-stream"; upload.save(AUDIO_DIR/audio_path)
     title=first(payload,("title",),""); explicit_category=first(payload,("category",),"")
     category,cleaned=voice_category(transcription)
-    if explicit_category: category=explicit_category
+    if explicit_category in VALID_CATEGORIES: category=explicit_category
     elif source=="ring": transcription=cleaned
     db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category)
       VALUES(?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category)); db().commit()
@@ -146,6 +148,7 @@ def entries():
 @api_auth
 def update_entry(entry_id):
     body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category"}; updates={k:body[k] for k in body if k in allowed}
+    if "category" in updates and updates["category"] not in VALID_CATEGORIES:return jsonify(error="Invalid category"),400
     if not updates:return jsonify(error="No supported fields supplied"),400
     values=[int(v) if k in {"starred","processed","archived"} else str(v) for k,v in updates.items()]
     cur=db().execute(f"UPDATE entries SET {', '.join(k+'=?' for k in updates)} WHERE id=?",(*values,entry_id)); db().commit()

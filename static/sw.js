@@ -1,5 +1,5 @@
-const STATIC='index-static-v8';
-const ASSETS=['/','/style.css?v=8','/app.js?v=8','/manifest.webmanifest?v=8','/icon.svg','https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js','https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js'];
+const STATIC='index-static-v9';
+const ASSETS=['/','/style.css?v=9','/app.js?v=9','/manifest.webmanifest?v=9','/icon.svg','https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js','https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js'];
 self.addEventListener('install',event=>{self.skipWaiting();event.waitUntil(caches.open(STATIC).then(cache=>cache.addAll(ASSETS)))});
 self.addEventListener('activate',event=>{event.waitUntil(Promise.all([self.clients.claim(),caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('index-static-')&&key!==STATIC).map(key=>caches.delete(key))))]))});
 self.addEventListener('fetch',event=>{if(event.request.method!=='GET')return;const url=new URL(event.request.url);if(url.origin!==location.origin&&url.hostname!=='www.gstatic.com')return;event.respondWith(fetch(event.request).then(response=>{if(response.ok&&!event.request.url.includes('/api/'))caches.open(STATIC).then(cache=>cache.put(event.request,response.clone()));return response}).catch(()=>caches.match(event.request).then(response=>response||caches.match('/'))))});
