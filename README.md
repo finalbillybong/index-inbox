@@ -160,6 +160,35 @@ Changing a password revokes every session for that account. Local login is limit
 
 Secure cookies require HTTPS. If the Cloudflare URL uses HTTPS but the LAN address uses plain HTTP, `AUTH_COOKIE_SECURE=true` protects the remote session but the browser will not authenticate over the LAN HTTP address. Prefer HTTPS on both routes. Use `AUTH_COOKIE_SECURE=false` only for isolated HTTP testing; it permits the local-auth cookie to travel without transport encryption.
 
+### After first-run setup
+
+Once the owner account works, harden the production configuration:
+
+1. Remove `LOCAL_SETUP_TOKEN` from `.env`. The browser setup endpoint is already disabled after the first user exists, but the bootstrap secret is no longer needed.
+2. Set `AUTH_COOKIE_SECURE=true` when accessing Index Inbox through HTTPS.
+3. Remove unused LAN or HTTP entries from `AUTH_ALLOWED_ORIGINS`; retain only the exact origins you use.
+4. Do not forward port `5050` from the router. Expose remote access through the HTTPS tunnel or reverse proxy only.
+
+A Cloudflare-only example is:
+
+```dotenv
+AUTH_PROVIDER=local
+AUTH_COOKIE_SECURE=true
+AUTH_ALLOWED_ORIGINS=https://index.example.com
+```
+
+Apply environment-only changes without rebuilding the image:
+
+```bash
+docker compose up -d --force-recreate
+```
+
+Verify the active container configuration:
+
+```bash
+docker exec index-inbox printenv AUTH_PROVIDER AUTH_COOKIE_SECURE AUTH_ALLOWED_ORIGINS
+```
+
 ## Firebase setup
 
 1. Create or select a Firebase project.
