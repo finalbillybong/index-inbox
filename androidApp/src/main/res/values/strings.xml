@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Index Inbox</string>
+    <string name="capture_widget_description">Record an audio note directly into Index Inbox</string>
+    <string name="capture_widget_action">Record audio note</string>
+    <string name="capture_widget_ready">Index Inbox</string>
+    <string name="capture_widget_tap">Tap to record</string>
+</resources>

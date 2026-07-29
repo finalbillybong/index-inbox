@@ -142,6 +142,7 @@ data class AppState(
     val groupFilter: String = "",
     val notificationsEnabled: Boolean = true,
     val instantNotifications: Boolean = true,
+    val widgetCaptureMode: String = "instant",
     val syncStatus: String = "Saved notes available offline",
 )
 
@@ -154,7 +155,7 @@ class IndexViewModel(
     val entries = dao.observeInbox().catch { emit(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val pendingCaptures=pendingDao.observeAll().stateIn(viewModelScope,SharingStarted.WhileSubscribed(5_000),emptyList())
-    private val _state = MutableStateFlow(AppState(authenticated=auth.token!=null,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications))
+    private val _state = MutableStateFlow(AppState(authenticated=auth.token!=null,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode))
     val state: StateFlow<AppState> = _state
     private val _groups = MutableStateFlow<List<NoteGroup>>(emptyList())
     val groups: StateFlow<List<NoteGroup>> = _groups
@@ -201,7 +202,8 @@ class IndexViewModel(
                 SyncWorker.schedule(getApplication())
                 PendingCaptureWorker.schedule(getApplication())
                 if(auth.notificationsEnabled&&auth.instantNotifications)InstantSyncService.start(getApplication())
-                _state.value=AppState(authenticated=true,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications)
+                _state.value=AppState(authenticated=true,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode)
+                CaptureWidgetProvider.updateAll(getApplication())
                 refresh()
             } catch(error:Exception) {
                 _state.value=_state.value.copy(error=friendlyLoginError(error))
@@ -274,6 +276,12 @@ class IndexViewModel(
         auth.setInstantNotifications(enabled)
         _state.value=_state.value.copy(instantNotifications=enabled)
         if(enabled&&_state.value.notificationsEnabled)InstantSyncService.start(getApplication()) else InstantSyncService.stop(getApplication())
+    }
+    fun setWidgetCaptureMode(mode: String) {
+        if (mode !in setOf("instant", "review")) return
+        auth.setWidgetCaptureMode(mode)
+        _state.value = _state.value.copy(widgetCaptureMode = mode)
+        CaptureWidgetProvider.updateAll(getApplication())
     }
     fun setFilter(filter: String) { _state.value = _state.value.copy(inboxFilter = filter) }
     fun setCategoryFilter(category: String) { _state.value = _state.value.copy(categoryFilter = category) }
@@ -684,7 +692,8 @@ class IndexViewModel(
             auth.clear()
             SyncWorker.cancel(getApplication())
             InstantSyncService.stop(getApplication())
-            _state.value=AppState(darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications)
+            CaptureWidgetProvider.updateAll(getApplication())
+            _state.value=AppState(darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode)
         }
     }
 
@@ -713,6 +722,7 @@ class MainActivity : ComponentActivity() {
         })[IndexViewModel::class.java]
         receiveSharedText(intent)
         receiveNotification(intent)
+        receiveWidgetAction(intent)
         setContent {
             val state by viewModel.state.collectAsState()
             val systemDark=isSystemInDarkTheme()
@@ -727,6 +737,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         receiveSharedText(intent)
         receiveNotification(intent)
+        receiveWidgetAction(intent)
     }
 
     private fun receiveSharedText(intent: Intent?) {
@@ -744,9 +755,43 @@ class MainActivity : ComponentActivity() {
         intent.removeExtra("notification_target")
         intent.removeExtra("entry_id")
     }
+
+    private fun receiveWidgetAction(intent: Intent?) {
+        when (intent?.action) {
+            ACTION_WIDGET_SETUP -> {
+                if (viewModel.state.value.authenticated) {
+                    SharedCapture.audioPath = CaptureWidgetState.file(this)?.let(::File)?.takeIf(File::exists)?.absolutePath
+                    SharedCapture.status = if (SharedCapture.audioPath == null) {
+                        "Grant microphone access, then record once to finish widget setup."
+                    } else {
+                        "A recording was not sent. Review it and try saving again."
+                    }
+                    viewModel.showCapture(true)
+                }
+                intent.action = null
+            }
+            ACTION_WIDGET_REVIEW -> {
+                AudioCaptureService.finishForReview(this)?.let {
+                    SharedCapture.audioPath = it.absolutePath
+                    SharedCapture.status = "Transcribing on your server…"
+                    viewModel.showCapture(true)
+                }
+                intent.action = null
+            }
+        }
+    }
+
+    companion object {
+        const val ACTION_WIDGET_SETUP = "com.indexinbox.android.widget.SETUP"
+        const val ACTION_WIDGET_REVIEW = "com.indexinbox.android.widget.REVIEW"
+    }
 }
 
-private object SharedCapture { var text: String = "" }
+private object SharedCapture {
+    var text: String = ""
+    var audioPath: String? = null
+    var status: String = ""
+}
 
 internal fun filterInboxEntries(
     entries:List<Entry>,
@@ -845,6 +890,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             indexRingSecret=indexRingSecret,
             notificationsEnabled=state.notificationsEnabled,
             instantNotifications=state.instantNotifications,
+            widgetCaptureMode=state.widgetCaptureMode,
             onBack={viewModel.showScreen("inbox")},
             onBackup=viewModel::createBackup,
             onRetention=viewModel::runRetention,
@@ -853,6 +899,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onBackupHook=viewModel::triggerBackupHook,
             onNotifications=viewModel::setNotifications,
             onInstantNotifications=viewModel::setInstantNotifications,
+            onWidgetCaptureMode=viewModel::setWidgetCaptureMode,
             onRevokeOthers=viewModel::revokeOtherDevices,
             onCheckUpdate=viewModel::checkForUpdate,
             onInstallUpdate=viewModel::installUpdate,
@@ -870,10 +917,22 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
         )
         state.captureOpen -> CaptureScreen(
             initial = SharedCapture.text,
+            initialAudio = SharedCapture.audioPath?.let(::File)?.takeIf(File::exists),
+            initialStatus = SharedCapture.status,
             loading = state.loading,
-            onClose = { SharedCapture.text = ""; viewModel.showCapture(false) },
-            onSave = { title, text, category -> SharedCapture.text = ""; viewModel.capture(text, title,category) },
-            onSaveAudio = { title, text, category, file -> SharedCapture.text = ""; viewModel.captureAudio(file, text,title,category) },
+            onClose = {
+                val widgetAudio = SharedCapture.audioPath != null
+                SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""
+                if (widgetAudio) CaptureWidgetState.set(viewModel.getApplication(), "ready")
+                viewModel.showCapture(false)
+            },
+            onSave = { title, text, category -> SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; viewModel.capture(text, title,category) },
+            onSaveAudio = { title, text, category, file ->
+                val widgetAudio = SharedCapture.audioPath != null
+                SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""
+                if (widgetAudio) CaptureWidgetState.set(viewModel.getApplication(), "ready")
+                viewModel.captureAudio(file, text,title,category)
+            },
             onTranscribe = viewModel::transcribeAudio,
         )
         state.selected != null -> EntryScreen(
@@ -1517,6 +1576,7 @@ private fun StatusScreen(
     indexRingSecret: String?,
     notificationsEnabled: Boolean,
     instantNotifications: Boolean,
+    widgetCaptureMode: String,
     onBack: () -> Unit,
     onBackup: () -> Unit,
     onRetention: (Int) -> Unit,
@@ -1525,6 +1585,7 @@ private fun StatusScreen(
     onBackupHook: () -> Unit,
     onNotifications: (Boolean) -> Unit,
     onInstantNotifications: (Boolean) -> Unit,
+    onWidgetCaptureMode: (String) -> Unit,
     onRevokeOthers: () -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -1629,6 +1690,26 @@ private fun StatusScreen(
                 }
                 Switch(checked=instantNotifications,onCheckedChange=onInstantNotifications,enabled=notificationsEnabled)
             }
+            HorizontalDivider()
+            Text("Home-screen audio widget",fontWeight=FontWeight.Bold)
+            Text("Add the Index Inbox widget from your launcher. Tap once to record and again to stop.")
+            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected=widgetCaptureMode=="instant",
+                    onClick={onWidgetCaptureMode("instant")},
+                    label={Text("Instant save")},
+                )
+                FilterChip(
+                    selected=widgetCaptureMode=="review",
+                    onClick={onWidgetCaptureMode("review")},
+                    label={Text("Review first")},
+                )
+            }
+            Text(
+                if(widgetCaptureMode=="instant")"The second tap uploads and saves immediately."
+                else "The second tap opens the transcript so you can correct it before saving.",
+                style=MaterialTheme.typography.labelSmall,
+            )
             HorizontalDivider()
             Text("Signed-in devices",fontWeight=FontWeight.Bold)
             devices.forEach { device ->
@@ -1753,6 +1834,8 @@ private fun PendingCaptureCard(
 @Composable
 private fun CaptureScreen(
     initial: String,
+    initialAudio: File? = null,
+    initialStatus: String = "",
     loading: Boolean,
     onClose: () -> Unit,
     onSave: (String, String, String) -> Unit,
@@ -1764,9 +1847,9 @@ private fun CaptureScreen(
     var text by remember(initial) { mutableStateOf(initial) }
     var category by remember { mutableStateOf("note") }
     var recorder by remember { mutableStateOf<MediaRecorder?>(null) }
-    var recordingFile by remember { mutableStateOf<File?>(null) }
+    var recordingFile by remember(initialAudio) { mutableStateOf(initialAudio) }
     var isRecording by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("") }
+    var status by remember(initialStatus) { mutableStateOf(initialStatus) }
     fun stopRecording() {
         runCatching { recorder?.stop() }
         recorder?.release()
@@ -1802,8 +1885,24 @@ private fun CaptureScreen(
         isRecording = true
         status = "Recording…"
     }
+    LaunchedEffect(initialAudio) {
+        initialAudio?.let { file ->
+            status = "Transcribing on your server…"
+            onTranscribe(file) { result ->
+                result.onSuccess {
+                    text = it
+                    status = "Transcription ready. Review or correct it before saving."
+                }.onFailure {
+                    status = "Transcription failed: ${it.message}. The recording is still available."
+                }
+            }
+        }
+    }
     val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) runCatching { startRecording() }.onFailure { status = "Could not start recording: ${it.message}" }
+        if (granted) {
+            CaptureWidgetProvider.updateAll(context)
+            runCatching { startRecording() }.onFailure { status = "Could not start recording: ${it.message}" }
+        }
         else status = "Microphone permission was denied."
     }
     DisposableEffect(Unit) {
@@ -1819,7 +1918,10 @@ private fun CaptureScreen(
             navigationIcon = { IconButton(onClick = onClose) { Icon(Icons.Default.Close, "Close") } },
         )
     }) { padding ->
-        Column(Modifier.padding(padding).padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(
+            Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
             OutlinedTextField(title, { title = it }, label = { Text("Title (optional)") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(text, { text = it }, label = { Text("What do you want to remember?") }, minLines = 9, modifier = Modifier.fillMaxWidth())
             Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
