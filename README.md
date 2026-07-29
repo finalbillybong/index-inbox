@@ -20,6 +20,8 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - JSON, Markdown and ZIP/audio exports
 - Verified restorable backups with manifests, status, retention, and optional external hook
 - Installable responsive PWA with manual text/audio capture
+- Native Android app with offline capture, instant self-hosted notifications and signed updates
+- Prebuilt server image published through GitHub Container Registry
 - CPU-local transcription of browser recordings with editable previews
 - Cached recent entries and mobile share-target support
 
@@ -59,31 +61,26 @@ Existing installations continue to use Firebase when `AUTH_PROVIDER` is omitted.
 - A public HTTPS hostname through a reverse proxy or secure tunnel
 - For Firebase mode only: a Firebase project and service-account JSON file
 
-## Quick start
+## Quick start: local authentication
 
-1. Clone the repository:
+The published image includes the web application, API and matching signed Android APK. A new server needs Docker Compose, an HTTPS origin and a persistent data directory; it does not need Git, Python, Java or the Android SDK.
 
-   ```bash
-   git clone https://github.com/finalbillybong/index-inbox.git
-   cd index-inbox
-   ```
+Run the setup helper with the public HTTPS origin and absolute data path:
 
-2. Create the environment file:
+```bash
+curl -fsSL https://raw.githubusercontent.com/finalbillybong/index-inbox/main/setup.sh \
+  | bash -s -- https://index.example.com /absolute/path/to/index-inbox/data
+```
 
-   ```bash
-   cp .env.example .env
-   openssl rand -hex 32
-   ```
+The helper downloads `compose.yaml`, generates independent webhook and setup secrets, creates `.env`, pulls the latest GHCR image and starts the service. It prints the one-time setup token.
 
-3. Put the generated value in `WEBHOOK_SECRET`, choose `AUTH_PROVIDER=local` or `AUTH_PROVIDER=firebase`, and configure the remaining variables.
+Open the HTTPS origin and create the first owner using that token, a username and a password of at least 12 characters. Then remove the `LOCAL_SETUP_TOKEN` line from `.env` and recreate the container:
 
-4. Start the service:
+```bash
+docker compose up -d --force-recreate
+```
 
-   ```bash
-   docker compose up -d --build
-   ```
-
-5. Check its health:
+Check local container health with:
 
    ```bash
    curl http://127.0.0.1:5050/health
@@ -104,6 +101,7 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 | `AUTH_COOKIE_SECURE` | Local | Keep `true` in production; set `false` only for localhost HTTP testing |
 | `AUTH_SESSION_DAYS` | Local | Absolute local-session lifetime, default 30 days |
 | `AUTH_IDLE_DAYS` | Local | Local-session idle timeout, default 7 days |
+| `AUTH_DEVICE_DAYS` | Local | Lifetime of a native-app device token, default 90 days |
 | `TRUSTED_PROXY_HOPS` | No | Number of trusted forwarding hops; defaults to `0`, which ignores forwarded client-IP headers |
 | `TRUSTED_PROXY_CIDRS` | Proxy trust | Comma-separated IP networks allowed to supply forwarded client addresses |
 | `LOCAL_SETUP_TOKEN` | Local setup | One-time secret required to create the first owner through the browser |
@@ -163,10 +161,11 @@ Local mode keeps account credentials and sessions in the same SQLite database as
 
    Origins are matched exactly. Use the address shown by `location.origin` in the browser, including the scheme and any non-default port.
 
-3. Build and start the container:
+3. Pull and start the published container:
 
    ```bash
-   docker compose up -d --build
+   docker compose pull
+   docker compose up -d
    ```
 
    Put the generated value in `LOCAL_SETUP_TOKEN`, open Index Inbox, and use it on the first-run screen to create the owner account. Web setup is permanently unavailable after the first local user exists. Remove `LOCAL_SETUP_TOKEN` from `.env` afterward and recreate the container with `docker compose up -d --force-recreate`.
@@ -183,6 +182,64 @@ Local mode keeps account credentials and sessions in the same SQLite database as
    ```
 
 Changing a password revokes every session for that account. Local login is limited after repeated failures. The browser uses a Secure, HttpOnly, SameSite cookie plus a separate CSRF token for changes.
+
+## Native Android app
+
+The `androidApp` module is a native Kotlin and Jetpack Compose client for local-auth installations. It uses a revocable per-device bearer token; the website continues to use its existing cookie and CSRF authentication.
+
+Deploy the current server before opening the Android app. The SQLite migration for native device tokens runs automatically at startup:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Build a debug APK with Android SDK Platform 35 and JDK 17:
+
+```bash
+JAVA_HOME=/path/to/jdk17 ./gradlew :androidApp:assembleDebug
+```
+
+The APK is written to `androidApp/build/outputs/apk/debug/androidApp-debug.apk`. On first launch, enter the public HTTPS address of Index Inbox and the existing local username and password. The app stores the returned device token in Android encrypted preferences; it does not retain the password.
+
+Native device tokens expire after `AUTH_DEVICE_DAYS` (90 days by default). Changing the account password or running `flask auth revoke-sessions` immediately revokes both browser sessions and native device tokens.
+
+### Self-hosted Android updates
+
+The published GHCR image embeds the matching signed APK and its version metadata. Signed-in users can download the initial APK using the **Android app** button in the web header or from the matching GitHub Release. Native clients can check, securely download, checksum-verify and open later releases in Android's package installer from **Storage, backups & settings**.
+
+Server owners update the container first with `docker compose pull && docker compose up -d`; the newly embedded APK then becomes available to installed clients. Every Android release is signed with the same permanent key.
+
+Release signing is read from an ignored `keystore.properties` file in the project root:
+
+```properties
+storeFile=/absolute/path/to/index-inbox-release.jks
+storePassword=your-keystore-password
+keyAlias=index-inbox
+keyPassword=your-key-password
+```
+
+Build the signed artifact with `./gradlew :androidApp:assembleRelease`. Back up the keystore and its passwords: Android will not accept future updates signed with a replacement key.
+
+The Android app records AAC audio notes and uploads a temporary copy to `/api/transcribe` as soon as recording stops. The editable transcription is shown before the user commits the note. Saving uploads the reviewed text and original recording together to `/api/manual`.
+
+For fully self-hosted instant notifications, the signed-in app runs a visible foreground messaging service and holds an authenticated long-poll request to `/api/changes/wait`. Android displays a permanent **Index Inbox connected** notification while this connection is active. New capture and failure events normally arrive within a second of being written by the server. WorkManager polling remains as a battery-managed fallback if Android interrupts the live service.
+
+The live connection occupies one Gunicorn thread per connected Android device. The supplied Docker image runs four threads, which is appropriate for a single-user installation with one or two phones. Increase the Gunicorn thread count before connecting more devices.
+
+Native parity currently includes active/unprocessed/starred/archived filters, multi-select bulk actions, entry categories, the recent activity feed, group listing and timelines, archive/reopen controls, and conservative group-suggestion review. The server remains the source of truth and the Room cache is refreshed after native mutations.
+
+Native synchronization retrieves every API page and atomically reconciles the Room cache to the complete server snapshot. Notes deleted through the PWA are therefore removed from Android on the next refresh or live change event. Native deletion treats a server `404` as an already-completed delete and removes any stale local copy.
+
+The native administration surface reports entry, audio and database storage, transcription status, and the latest verified backup. It can create a new verified backup and run confirmed age-based audio retention. Group controls support rename, archive/reopen, timeline browsing, suggestion review, and spoken-alias addition/removal.
+
+Inbox parity includes independent state, category, and group filters plus assignment between standalone notes and active groups. Manual capture supports category selection and local recording playback before save. Group timeline entries can edit transcription, tags, and category while playing authenticated audio at 0.75×, 1×, 1.5×, or 2× speed. Entry, bulk-entry, and group removal use explicit confirmation.
+
+Authenticated downloads stream through the native Android document picker, keeping device credentials out of browser URLs and requiring no broad storage permission. The app can save complete JSON, Markdown, and ZIP/audio exports, group-scoped exports, the latest verified backup, and individual original audio files. Configured external backup hooks can also be triggered from the storage screen.
+
+Native settings can disable all activity notifications or independently stop the permanent self-hosted instant connection while retaining periodic fallback sync. The current native device can inspect privacy-safe session metadata and revoke every other device token. Entry details can display the formatted original webhook payload for diagnostics.
+
+Text and audio captures that fail because the network is unavailable or the server returns a 5xx response are stored durably in the Room pending queue. Audio is copied to app-private storage before the capture screen closes. WorkManager retries with network constraints, stable recorded timestamps make retries idempotent, and the Pending screen supports editing metadata or discarding queued text and audio. Client errors such as invalid authentication remain visible instead of being silently queued.
 
 `AUTH_ALLOWED_ORIGINS` accepts multiple exact origins separated by commas, for example a Cloudflare Tunnel URL and a LAN address. Include the scheme and non-default port, and omit paths and trailing slashes.
 
@@ -446,16 +503,26 @@ For a conventional file-level backup of live `/data`, remember that SQLite WAL m
 
 ## Updating
 
-Index Inbox performs additive SQLite migrations automatically. Preserve `INDEX_DATA_PATH`, pull the new code and rebuild:
+Index Inbox performs additive SQLite migrations automatically. Preserve `INDEX_DATA_PATH`, pull the published image and recreate the service:
 
 ```bash
-git pull
-docker compose down
-docker compose build --no-cache
+docker compose pull
 docker compose up -d
 ```
 
-Existing entries and audio remain intact.
+Existing accounts, entries and audio remain intact. Pin `INDEX_INBOX_VERSION` in `.env` when you prefer controlled upgrades instead of `latest`.
+
+## Publishing releases
+
+Pushing a tag such as `v0.10.1` runs `.github/workflows/release.yml`. GitHub Actions tests and signs the Android app, embeds that exact APK into the server image, publishes versioned and `latest` tags to GHCR, and creates a GitHub Release containing the APK, Compose file, environment template and setup helper.
+
+The repository must define these encrypted Actions secrets:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_STORE_PASSWORD`
+- `ANDROID_KEY_PASSWORD`
+
+The signing files and passwords are ignored by Git and Docker. Never replace the signing key after users install a release; Android will reject updates signed by another identity.
 
 ## Development tests
 

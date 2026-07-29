@@ -40,6 +40,16 @@ test.describe.serial('Index Inbox browser flows', () => {
     await expect(page.locator('#entries textarea.text')).toHaveValue('browser capture arrived');
   });
 
+  test('authenticated web app downloads the embedded Android release', async ({ page }) => {
+    await login(page);
+    const button = page.locator('#android-install');
+    await expect(button).toHaveText('Android 0.10.1');
+    const downloadPromise = page.waitForEvent('download');
+    await button.click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe('index-inbox.apk');
+  });
+
   test('group lifecycle and suggestions require confirmation', async ({ page, request }) => {
     await login(page);
     await webhook(request, 'Create Browser forty two');

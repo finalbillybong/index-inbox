@@ -1,4 +1,4 @@
-import csv, hashlib, io, ipaddress, json, os, re, secrets, sqlite3, tempfile, threading, urllib.request, uuid, zipfile
+import csv, hashlib, io, ipaddress, json, os, re, secrets, sqlite3, tempfile, threading, time, urllib.request, uuid, zipfile
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
@@ -24,6 +24,7 @@ AUTH_ALLOWED_ORIGINS = {x.strip().rstrip("/") for x in AUTH_ORIGINS_VALUE.split(
 LOCAL_SETUP_TOKEN = os.getenv("LOCAL_SETUP_TOKEN", "")
 AUTH_SESSION_DAYS = max(int(os.getenv("AUTH_SESSION_DAYS", "30")), 1)
 AUTH_IDLE_DAYS = max(int(os.getenv("AUTH_IDLE_DAYS", "7")), 1)
+AUTH_DEVICE_DAYS = max(int(os.getenv("AUTH_DEVICE_DAYS", "90")), 1)
 TRUSTED_PROXY_HOPS = max(int(os.getenv("TRUSTED_PROXY_HOPS", "0")), 0)
 try:TRUSTED_PROXY_NETWORKS=tuple(ipaddress.ip_network(value.strip(),strict=False) for value in os.getenv("TRUSTED_PROXY_CIDRS","").split(",") if value.strip())
 except ValueError as error:raise RuntimeError(f"Invalid TRUSTED_PROXY_CIDRS: {error}") from error
@@ -33,6 +34,9 @@ PASSWORD_HASHER = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4)
 DUMMY_PASSWORD_HASH = PASSWORD_HASHER.hash("index-inbox-dummy-password")
 MAX_AUDIO_BYTES = int(os.getenv("MAX_AUDIO_MB", "25")) * 1024 * 1024
 BACKUP_HOOK_URL = os.getenv("BACKUP_HOOK_URL", "")
+ANDROID_UPDATE_VERSION_CODE = max(int(os.getenv("ANDROID_UPDATE_VERSION_CODE", "0")), 0)
+ANDROID_UPDATE_VERSION_NAME = os.getenv("ANDROID_UPDATE_VERSION_NAME", "").strip()
+ANDROID_UPDATE_APK = Path(os.getenv("ANDROID_UPDATE_APK_PATH", str(DATA_DIR / "releases" / "index-inbox.apk")))
 TRANSCRIPTION_ENABLED = os.getenv("TRANSCRIPTION_ENABLED", "true").lower() == "true"
 TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "tiny.en").strip()
 TRANSCRIPTION_LANGUAGE = os.getenv("TRANSCRIPTION_LANGUAGE", "en").strip() or None
@@ -73,6 +77,10 @@ def init_db():
       CREATE TABLE IF NOT EXISTS local_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
         session_version INTEGER NOT NULL, csrf_token TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
         expires_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES local_users(id) ON DELETE CASCADE);
+      CREATE TABLE IF NOT EXISTS local_device_tokens (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL,
+        session_version INTEGER NOT NULL, device_name TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES local_users(id) ON DELETE CASCADE);
+      CREATE INDEX IF NOT EXISTS idx_local_device_tokens_user ON local_device_tokens(user_id,created_at);
       CREATE TABLE IF NOT EXISTS login_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, attempted_at TEXT NOT NULL,
         username TEXT NOT NULL, source_ip TEXT NOT NULL, peer_ip TEXT NOT NULL DEFAULT '', successful INTEGER NOT NULL DEFAULT 0);
       CREATE INDEX IF NOT EXISTS idx_login_attempts_lookup ON login_attempts(username,source_ip,attempted_at);
@@ -136,6 +144,21 @@ def local_user():
     db().execute("UPDATE local_sessions SET last_seen_at=? WHERE token_hash=?",(current,row["token_hash"])); db().commit()
     return row
 
+def local_device_user():
+    header=request.headers.get("Authorization","")
+    if not header.startswith("Bearer "):return None
+    token=header[7:].strip()
+    if not token:return None
+    token_hash=session_token_hash(token)
+    row=db().execute("""SELECT t.*,u.username,u.enabled,u.session_version AS current_version FROM local_device_tokens t
+      JOIN local_users u ON u.id=t.user_id WHERE t.token_hash=?""",(token_hash,)).fetchone()
+    current=now()
+    if not row or not row["enabled"] or row["session_version"]!=row["current_version"] or row["expires_at"]<=current:
+        if row:db().execute("DELETE FROM local_device_tokens WHERE token_hash=?",(token_hash,)); db().commit()
+        return None
+    db().execute("UPDATE local_device_tokens SET last_seen_at=? WHERE token_hash=?",(current,token_hash)); db().commit()
+    return row
+
 def api_auth(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
@@ -150,12 +173,16 @@ def api_auth(fn):
             if ALLOWED_EMAILS and email not in ALLOWED_EMAILS:return jsonify(error="This account is not allowed"),403
             g.user={"id":claims.get("uid"),"username":email,"provider":"firebase","claims":claims}
         else:
-            session=local_user()
-            if not session:return jsonify(error="Authentication required"),401
-            if request.method in {"POST","PUT","PATCH","DELETE"}:
+            device=local_device_user()
+            session=None if device else local_user()
+            if not device and not session:return jsonify(error="Authentication required"),401
+            if session and request.method in {"POST","PUT","PATCH","DELETE"}:
                 supplied=request.headers.get("X-CSRF-Token","")
                 if not request_origin_allowed() or not supplied or not secrets.compare_digest(supplied,session["csrf_token"]):return jsonify(error="Invalid CSRF token"),403
-            g.user={"id":str(session["user_id"]),"username":session["username"],"provider":"local"}; g.local_session=session
+            identity=device or session
+            g.user={"id":str(identity["user_id"]),"username":identity["username"],"provider":"local"}
+            if device:g.local_device=device
+            else:g.local_session=session
         return fn(*args,**kwargs)
     return wrapped
 
@@ -180,6 +207,20 @@ def create_local_session(user):
     response=jsonify(authenticated=True,username=user["username"],csrfToken=csrf)
     response.set_cookie(AUTH_COOKIE,token,secure=AUTH_COOKIE_SECURE,httponly=True,samesite="Lax",path="/",max_age=AUTH_SESSION_DAYS*86400)
     return response
+
+def authenticate_local_credentials(username,password,source,peer):
+    if len(password)>1024:return None,jsonify(error="Invalid username or password"),401
+    if login_limited(username,source):return None,jsonify(error="Too many login attempts; try again later"),429
+    user=db().execute("SELECT * FROM local_users WHERE username=?",(username,)).fetchone(); password_matches=False
+    try:password_matches=bool(user and PASSWORD_HASHER.verify(user["password_hash"],password))
+    except (VerifyMismatchError,InvalidHashError):pass
+    if not user:
+        try:PASSWORD_HASHER.verify(DUMMY_PASSWORD_HASH,password)
+        except VerifyMismatchError:pass
+    valid=bool(user and user["enabled"] and password_matches)
+    record_login_attempt(username,source,valid,peer)
+    if not valid:return None,jsonify(error="Invalid username or password"),401
+    return user,None,None
 
 def local_setup_required():return db().execute("SELECT count(*) FROM local_users").fetchone()[0]==0
 
@@ -213,18 +254,62 @@ def local_login():
     if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
     if not request_origin_allowed():return jsonify(error="Invalid request origin"),403
     body=request.get_json(silent=True) or {}; username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); source,peer=request_client_addresses()
-    if len(password)>1024:return jsonify(error="Invalid username or password"),401
-    if login_limited(username,source):return jsonify(error="Too many login attempts; try again later"),429
-    user=db().execute("SELECT * FROM local_users WHERE username=?",(username,)).fetchone(); password_matches=False
-    try:password_matches=bool(user and PASSWORD_HASHER.verify(user["password_hash"],password))
-    except (VerifyMismatchError,InvalidHashError):pass
-    if not user:
-        try:PASSWORD_HASHER.verify(DUMMY_PASSWORD_HASH,password)
-        except VerifyMismatchError:pass
-    valid=bool(user and user["enabled"] and password_matches)
-    record_login_attempt(username,source,valid,peer)
-    if not valid:return jsonify(error="Invalid username or password"),401
+    user,error,status=authenticate_local_credentials(username,password,source,peer)
+    if error:return error,status
     return create_local_session(user)
+
+@app.post("/auth/device/login")
+def local_device_login():
+    if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
+    body=request.get_json(silent=True) or {}; username=str(body.get("username","")).strip().lower()[:256]; password=str(body.get("password","")); device_name=str(body.get("deviceName","")).strip()[:100]
+    if not device_name:return jsonify(error="Device name is required"),400
+    source,peer=request_client_addresses()
+    user,error,status=authenticate_local_credentials(username,password,source,peer)
+    if error:return error,status
+    token=secrets.token_urlsafe(32); created=now(); expires=(datetime.now(timezone.utc)+timedelta(days=AUTH_DEVICE_DAYS)).isoformat()
+    connection=db(); connection.execute("DELETE FROM local_device_tokens WHERE expires_at<=?",(created,))
+    connection.execute("""INSERT INTO local_device_tokens
+      (token_hash,user_id,session_version,device_name,created_at,last_seen_at,expires_at) VALUES(?,?,?,?,?,?,?)""",
+      (session_token_hash(token),user["id"],user["session_version"],device_name,created,created,expires))
+    stale=connection.execute("SELECT token_hash FROM local_device_tokens WHERE user_id=? ORDER BY created_at DESC LIMIT -1 OFFSET 10",(user["id"],)).fetchall()
+    if stale:connection.executemany("DELETE FROM local_device_tokens WHERE token_hash=?",((row["token_hash"],) for row in stale))
+    connection.commit()
+    return jsonify(authenticated=True,username=user["username"],token=token,deviceName=device_name,expiresAt=expires),201
+
+@app.get("/auth/device/session")
+def local_device_session():
+    if AUTH_PROVIDER!="local":return jsonify(authenticated=False,provider=AUTH_PROVIDER),401
+    device=local_device_user()
+    if not device:return jsonify(authenticated=False,provider="local"),401
+    return jsonify(authenticated=True,provider="local",username=device["username"],deviceName=device["device_name"],expiresAt=device["expires_at"])
+
+@app.post("/auth/device/logout")
+def local_device_logout():
+    if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
+    device=local_device_user()
+    if not device:return jsonify(error="Authentication required"),401
+    db().execute("DELETE FROM local_device_tokens WHERE token_hash=?",(device["token_hash"],)); db().commit()
+    return jsonify(ok=True)
+
+@app.get("/auth/devices")
+@api_auth
+def local_devices():
+    if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
+    current=getattr(g,"local_device",None)
+    if not current:return jsonify(error="Native device authentication required"),403
+    rows=db().execute("""SELECT device_name,created_at,last_seen_at,expires_at,token_hash
+      FROM local_device_tokens WHERE user_id=? ORDER BY last_seen_at DESC""",(current["user_id"],)).fetchall()
+    return jsonify([{"deviceName":row["device_name"],"createdAt":row["created_at"],"lastSeenAt":row["last_seen_at"],
+      "expiresAt":row["expires_at"],"current":secrets.compare_digest(row["token_hash"],current["token_hash"])} for row in rows])
+
+@app.post("/auth/devices/revoke-others")
+@api_auth
+def revoke_other_devices():
+    if AUTH_PROVIDER!="local":return jsonify(error="Local authentication is not enabled"),404
+    current=getattr(g,"local_device",None)
+    if not current:return jsonify(error="Native device authentication required"),403
+    cursor=db().execute("DELETE FROM local_device_tokens WHERE user_id=? AND token_hash<>?",(current["user_id"],current["token_hash"])); db().commit()
+    return jsonify(ok=True,revoked=cursor.rowcount)
 
 @app.get("/auth/session")
 def local_session_status():
@@ -655,10 +740,27 @@ def changes():
     if "since" not in request.args:return jsonify(sequence=latest,events=[])
     try:since=max(int(request.args["since"]),0)
     except ValueError:return jsonify(error="since must be a non-negative integer"),400
+    return jsonify(change_feed_since(since,latest))
+
+def change_feed_since(since,latest=None):
+    if latest is None:latest=db().execute("SELECT coalesce(max(id),0) FROM activity").fetchone()[0]
     placeholders=",".join("?" for _ in CAPTURE_EVENT_KINDS)
-    rows=db().execute(f"SELECT id,created_at,level,kind,message FROM activity WHERE id>? AND kind IN ({placeholders}) ORDER BY id LIMIT 50",(since,*sorted(CAPTURE_EVENT_KINDS))).fetchall()
+    rows=db().execute(f"""SELECT id,created_at,level,kind,message,
+      CASE WHEN kind IN ('capture_standalone','capture_grouped','group_unrecognized') THEN details ELSE '' END AS details
+      FROM activity WHERE id>? AND kind IN ({placeholders}) ORDER BY id LIMIT 50""",(since,*sorted(CAPTURE_EVENT_KINDS))).fetchall()
     sequence=rows[-1]["id"] if len(rows)==50 else latest
-    return jsonify(sequence=sequence,events=[dict(row) for row in rows])
+    return {"sequence":sequence,"events":[dict(row) for row in rows]}
+
+@app.get("/api/changes/wait")
+@api_auth
+def wait_for_changes():
+    try:since=max(int(request.args.get("since","0")),0); timeout=min(max(float(request.args.get("timeout","25")),0),30)
+    except ValueError:return jsonify(error="since and timeout must be non-negative numbers"),400
+    deadline=time.monotonic()+timeout
+    while True:
+        feed=change_feed_since(since)
+        if feed["events"] or time.monotonic()>=deadline:return jsonify(feed)
+        time.sleep(min(0.5,max(deadline-time.monotonic(),0)))
 
 @app.errorhandler(413)
 def capture_too_large(_error):
@@ -718,6 +820,20 @@ def file_digest(path):
     with open(path,"rb") as source:
         for chunk in iter(lambda:source.read(1024*1024),b""):digest.update(chunk)
     return digest.hexdigest(),path.stat().st_size
+
+@app.get("/api/android-update")
+@api_auth
+def android_update():
+    if not ANDROID_UPDATE_VERSION_CODE or not ANDROID_UPDATE_VERSION_NAME or not ANDROID_UPDATE_APK.is_file():
+        return jsonify(available=False)
+    digest,size=file_digest(ANDROID_UPDATE_APK)
+    return jsonify(available=True,versionCode=ANDROID_UPDATE_VERSION_CODE,versionName=ANDROID_UPDATE_VERSION_NAME,bytes=size,sha256=digest)
+
+@app.get("/api/android-update/apk")
+@api_auth
+def android_update_apk():
+    if not ANDROID_UPDATE_APK.is_file():return jsonify(error="Android update is not configured"),404
+    return send_file(ANDROID_UPDATE_APK,as_attachment=True,download_name="index-inbox.apk",mimetype="application/vnd.android.package-archive")
 
 def create_backup_archive():
     run_id=str(uuid.uuid4()); requested=now(); archive_name=f"index-inbox-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{run_id[:8]}.zip"
@@ -826,14 +942,14 @@ def change_local_password(username):
     if not user:raise click.ClickException("Local user not found")
     password=click.prompt("New password",hide_input=True,confirmation_prompt=True)
     if len(password)<12:raise click.ClickException("Password must be at least 12 characters")
-    db().execute("UPDATE local_users SET password_hash=?,password_changed_at=?,session_version=session_version+1 WHERE id=?",(PASSWORD_HASHER.hash(password),now(),user["id"])); db().execute("DELETE FROM local_sessions WHERE user_id=?",(user["id"],)); db().commit(); click.echo(f"Password changed and sessions revoked for {username}")
+    db().execute("UPDATE local_users SET password_hash=?,password_changed_at=?,session_version=session_version+1 WHERE id=?",(PASSWORD_HASHER.hash(password),now(),user["id"])); db().execute("DELETE FROM local_sessions WHERE user_id=?",(user["id"],)); db().execute("DELETE FROM local_device_tokens WHERE user_id=?",(user["id"],)); db().commit(); click.echo(f"Password changed and all browser and native app sessions revoked for {username}")
 
 @auth_cli.command("revoke-sessions")
 @click.option("--username",prompt=True)
 def revoke_local_sessions(username):
     username=username.strip().lower(); user=db().execute("SELECT id FROM local_users WHERE username=?",(username,)).fetchone()
     if not user:raise click.ClickException("Local user not found")
-    db().execute("UPDATE local_users SET session_version=session_version+1 WHERE id=?",(user["id"],)); db().execute("DELETE FROM local_sessions WHERE user_id=?",(user["id"],)); db().commit(); click.echo(f"Sessions revoked for {username}")
+    db().execute("UPDATE local_users SET session_version=session_version+1 WHERE id=?",(user["id"],)); db().execute("DELETE FROM local_sessions WHERE user_id=?",(user["id"],)); db().execute("DELETE FROM local_device_tokens WHERE user_id=?",(user["id"],)); db().commit(); click.echo(f"All browser and native app sessions revoked for {username}")
 
 @auth_cli.command("list-users")
 def list_local_users():
