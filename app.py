@@ -523,6 +523,12 @@ def transcribe_upload(upload):
         return transcribe_audio(path)
     finally:path.unlink(missing_ok=True)
 
+def existing_source_entry(payload,source):
+    external_id=first(payload,("id","recordingId","recording_id","uuid","eventId"),"")
+    if not external_id:return None
+    source_key=hashlib.sha256(f"{source}:{external_id}".encode()).hexdigest()
+    return db().execute("SELECT id FROM entries WHERE source_key=?",(source_key,)).fetchone()
+
 def store_entry(payload, upload=None, source="ring"):
     entry_id = str(uuid.uuid4()); recorded = normalize_timestamp(first(payload,("recorded_at","recordedAt","timestamp","created_at"),None))
     transcription = first(payload,("transcription","transcript","text","content","note")); trigger = first(payload,("trigger","trigger_type","triggerType","mode","click_type"),source)
@@ -773,6 +779,10 @@ def transcribe():
 def manual():
     try:
         payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
+        existing=existing_source_entry(payload,"manual")
+        if existing:
+            log_activity("info","duplicate","Duplicate manual capture ignored",existing["id"])
+            return jsonify(ok=True,id=existing["id"],created=False,duplicate=True),200
         if upload and not first(payload,("transcription","transcript","text","content","note")):payload["transcription"]=transcribe_upload(upload)["transcription"]
         result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
     except Exception as error:

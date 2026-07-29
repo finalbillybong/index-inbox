@@ -58,6 +58,7 @@ interface IndexApi {
         @Part("title") title: RequestBody,
         @Part("category") category: RequestBody,
         @Part("recordedAt") recordedAt: RequestBody,
+        @Part("id") captureId: RequestBody,
     ): ApiResult
 
     @GET("api/changes")
