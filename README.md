@@ -21,6 +21,7 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - Verified restorable backups with manifests, status, retention, and optional external hook
 - Installable responsive PWA with manual text/audio capture
 - Native Android app with offline capture, instant self-hosted notifications and signed updates
+- Native Android home-screen widget for two-tap audio capture
 - Prebuilt server image published through GitHub Container Registry
 - CPU-local transcription of browser recordings with editable previews
 - Cached recent entries and mobile share-target support
@@ -140,6 +141,18 @@ TRANSCRIPTION_THREADS=4
 Microphone access requires HTTPS or a browser-trusted localhost origin. After deploying an update, allow microphone permission for the Index Inbox hostname. On hardened mobile operating systems, both the browser app and the website must have microphone access. If transcription fails, the recorded audio can still be saved; Index Inbox retries transcription server-side when an audio-only capture is submitted.
 
 Once the model has been downloaded, audio transcription occurs inside the Index Inbox container. The initial model download contacts the model host, but recordings are not sent there.
+
+## Android audio capture widget
+
+After installing the Android app, sign in and grant microphone access from **Capture → Record audio**. Then add the **Index Inbox** widget from the Android home-screen widget picker.
+
+- Tap once to start recording. Android shows a foreground recording notification with Stop and Cancel actions.
+- Tap again to stop. Recordings have a five-minute safety limit.
+- **Instant save** uploads the audio immediately; the self-hosted server transcribes and saves it as a note.
+- **Review first** opens the editable transcript in the app before anything is committed.
+- If the server is temporarily unreachable, Instant-save recordings are retained locally and use the existing pending-capture retry queue.
+
+Choose **Instant save** or **Review first** under **Storage & backup → Home-screen audio widget** in the Android app.
 
 ## Local authentication setup
 

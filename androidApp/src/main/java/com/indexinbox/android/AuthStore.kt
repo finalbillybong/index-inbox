@@ -20,6 +20,7 @@ class AuthStore(context: Context) {
         ?: if (prefs.contains("dark_mode")) if (darkMode) "dark" else "light" else "system"
     val notificationsEnabled: Boolean get() = prefs.getBoolean("notifications_enabled", true)
     val instantNotifications: Boolean get() = prefs.getBoolean("instant_notifications", true)
+    val widgetCaptureMode: String get() = prefs.getString("widget_capture_mode", "instant") ?: "instant"
 
     fun save(serverUrl: String, token: String) {
         prefs.edit().putString("server_url", normalizeUrl(serverUrl)).putString("token", token).apply()
@@ -29,6 +30,7 @@ class AuthStore(context: Context) {
     fun setThemeMode(mode: String) = prefs.edit().putString("theme_mode", mode).apply()
     fun setNotificationsEnabled(enabled: Boolean) = prefs.edit().putBoolean("notifications_enabled", enabled).apply()
     fun setInstantNotifications(enabled: Boolean) = prefs.edit().putBoolean("instant_notifications", enabled).apply()
+    fun setWidgetCaptureMode(mode: String) = prefs.edit().putString("widget_capture_mode", mode).apply()
 
     fun clear() = prefs.edit().remove("server_url").remove("token").apply()
 
