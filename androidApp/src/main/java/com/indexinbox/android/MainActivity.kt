@@ -85,7 +85,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -170,6 +172,10 @@ class IndexViewModel(
     val devices: StateFlow<List<DeviceSession>> = _devices
     private val _appUpdate = MutableStateFlow<AndroidUpdate?>(null)
     val appUpdate: StateFlow<AndroidUpdate?> = _appUpdate
+    private val _indexRingIntegration = MutableStateFlow<IndexRingIntegration?>(null)
+    val indexRingIntegration: StateFlow<IndexRingIntegration?> = _indexRingIntegration
+    private val _indexRingSecret = MutableStateFlow<String?>(null)
+    val indexRingSecret: StateFlow<String?> = _indexRingSecret
 
     init {
         if (auth.token != null) {
@@ -398,6 +404,36 @@ class IndexViewModel(
             _serverStatus.value=api.status()
             _devices.value=api.devices()
             _appUpdate.value=runCatching{api.androidUpdate()}.getOrNull()
+            _indexRingIntegration.value=runCatching{api.indexRingIntegration()}.getOrNull()
+        } }
+    }
+
+    fun revealIndexRingSecret(password:String) {
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy {
+            _indexRingSecret.value=ApiFactory.create(server,token)
+                .revealIndexRingSecret(IntegrationPasswordRequest(password)).secret
+        } }
+    }
+
+    fun rotateIndexRingSecret(password:String) {
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy {
+            val api=ApiFactory.create(server,token)
+            _indexRingSecret.value=api.rotateIndexRingSecret(IntegrationPasswordRequest(password)).secret
+            _indexRingIntegration.value=api.indexRingIntegration()
+            _state.value=_state.value.copy(error="Webhook secret rotated. Update the Pebble app now.")
+        } }
+    }
+
+    fun testIndexRing() {
+        val secret=_indexRingSecret.value
+        if(secret.isNullOrBlank()){_state.value=_state.value.copy(error="Reveal the webhook secret before testing.");return}
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy {
+            ApiFactory.create(server,token).testIndexRing(secret,ManualCapture("Index Ring connection test"))
+            _state.value=_state.value.copy(error="Test capture added to the inbox.")
+            refresh()
         } }
     }
 
@@ -758,6 +794,8 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
     val aliases by viewModel.aliases.collectAsState()
     val devices by viewModel.devices.collectAsState()
     val appUpdate by viewModel.appUpdate.collectAsState()
+    val indexRingIntegration by viewModel.indexRingIntegration.collectAsState()
+    val indexRingSecret by viewModel.indexRingSecret.collectAsState()
     val pending by viewModel.pendingCaptures.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -803,6 +841,8 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             serverStatus, state.loading,
             devices=devices,
             appUpdate=appUpdate,
+            indexRingIntegration=indexRingIntegration,
+            indexRingSecret=indexRingSecret,
             notificationsEnabled=state.notificationsEnabled,
             instantNotifications=state.instantNotifications,
             onBack={viewModel.showScreen("inbox")},
@@ -816,6 +856,9 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onRevokeOthers=viewModel::revokeOtherDevices,
             onCheckUpdate=viewModel::checkForUpdate,
             onInstallUpdate=viewModel::installUpdate,
+            onRevealIndexRing=viewModel::revealIndexRingSecret,
+            onRotateIndexRing=viewModel::rotateIndexRingSecret,
+            onTestIndexRing=viewModel::testIndexRing,
         )
         state.screen == "activity" -> ActivityScreen(activity, state.loading) { viewModel.showScreen("inbox") }
         state.screen == "pending" -> PendingCapturesScreen(
@@ -1460,6 +1503,8 @@ private fun StatusScreen(
     loading: Boolean,
     devices: List<DeviceSession>,
     appUpdate: AndroidUpdate?,
+    indexRingIntegration: IndexRingIntegration?,
+    indexRingSecret: String?,
     notificationsEnabled: Boolean,
     instantNotifications: Boolean,
     onBack: () -> Unit,
@@ -1473,9 +1518,15 @@ private fun StatusScreen(
     onRevokeOthers: () -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
+    onRevealIndexRing: (String) -> Unit,
+    onRotateIndexRing: (String) -> Unit,
+    onTestIndexRing: () -> Unit,
 ) {
     var retentionDialog by remember { mutableStateOf(false) }
     var days by remember { mutableStateOf("30") }
+    var integrationAction by remember { mutableStateOf<String?>(null) }
+    var integrationPassword by remember { mutableStateOf("") }
+    val clipboard=LocalClipboardManager.current
     val markdownExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri -> if(uri!=null)onExport("markdown",uri) }
     val jsonExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> if(uri!=null)onExport("json",uri) }
     val zipExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> if(uri!=null)onExport("zip",uri) }
@@ -1495,6 +1546,24 @@ private fun StatusScreen(
         }){Text("Remove audio")}},
         dismissButton={TextButton(onClick={retentionDialog=false}){Text("Cancel")}},
     )
+    if(integrationAction!=null) AlertDialog(
+        onDismissRequest={integrationAction=null;integrationPassword=""},
+        title={Text(if(integrationAction=="rotate")"Rotate webhook secret?" else "Reveal webhook secret?")},
+        text={Column(verticalArrangement=Arrangement.spacedBy(8.dp)){
+            if(integrationAction=="rotate")Text("The old value will stop working immediately. Update the Pebble app after rotation.")
+            if(indexRingIntegration?.requiresPassword==true)OutlinedTextField(
+                integrationPassword,{integrationPassword=it},label={Text("Current account password")},
+                visualTransformation=PasswordVisualTransformation(),singleLine=true,
+            )
+        }},
+        confirmButton={TextButton(onClick={
+            if(integrationAction=="rotate")onRotateIndexRing(integrationPassword) else onRevealIndexRing(integrationPassword)
+            integrationAction=null;integrationPassword=""
+        },enabled=indexRingIntegration?.requiresPassword!=true||integrationPassword.isNotBlank()){
+            Text(if(integrationAction=="rotate")"Rotate" else "Reveal")
+        }},
+        dismissButton={TextButton(onClick={integrationAction=null;integrationPassword=""}){Text("Cancel")}},
+    )
     Scaffold(topBar={
         TopAppBar(
             title={Text("Storage & backup")},
@@ -1510,6 +1579,21 @@ private fun StatusScreen(
             HorizontalDivider()
             Text("Transcription",fontWeight=FontWeight.Bold)
             Text(if(status.transcriptionEnabled)"Enabled • ${status.transcriptionModel}" else "Disabled")
+            HorizontalDivider()
+            Text("Index Ring integration",fontWeight=FontWeight.Bold)
+            Text("Add this URL and the X-Webhook-Secret header to the Index webhook in the Pebble app.")
+            Text(indexRingIntegration?.webhookUrl ?: "Integration details unavailable",style=MaterialTheme.typography.bodySmall)
+            OutlinedButton(
+                onClick={indexRingIntegration?.webhookUrl?.let{clipboard.setText(AnnotatedString(it))}},
+                enabled=indexRingIntegration!=null,
+            ){Text("Copy webhook URL")}
+            Text(indexRingSecret ?: indexRingIntegration?.maskedSecret.orEmpty(),style=MaterialTheme.typography.bodySmall)
+            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick={integrationAction="reveal"},enabled=indexRingIntegration?.configured==true){Text("Reveal")}
+                OutlinedButton(onClick={indexRingSecret?.let{clipboard.setText(AnnotatedString(it))}},enabled=!indexRingSecret.isNullOrBlank()){Text("Copy secret")}
+                OutlinedButton(onClick=onTestIndexRing,enabled=!indexRingSecret.isNullOrBlank()){Text("Test")}
+                OutlinedButton(onClick={integrationAction="rotate"},enabled=indexRingIntegration!=null){Text("Rotate")}
+            }
             HorizontalDivider()
             Text("App updates",fontWeight=FontWeight.Bold)
             Text("Installed: ${BuildConfig.VERSION_NAME}")

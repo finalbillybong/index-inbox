@@ -43,6 +43,7 @@ class LocalAuthTests(unittest.TestCase):
             self.module.db().execute("DELETE FROM local_sessions")
             self.module.db().execute("DELETE FROM local_device_tokens")
             self.module.db().execute("DELETE FROM login_attempts")
+            self.module.db().execute("DELETE FROM app_settings")
             self.module.db().commit()
         self.client.delete_cookie("index_session")
 
@@ -284,6 +285,32 @@ class LocalAuthTests(unittest.TestCase):
         )
         self.assertEqual(rejected.status_code, 401)
         self.assertEqual(accepted.status_code, 201)
+
+    def test_index_ring_secret_requires_password_and_rotation_invalidates_old_secret(self):
+        login=self.login()
+        headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        metadata=self.client.get("/api/integrations/index-ring")
+        self.assertEqual(metadata.status_code,200)
+        self.assertEqual(metadata.json["webhookPath"],"/webhook/index")
+        self.assertTrue(metadata.json["requiresPassword"])
+        self.assertNotIn("test-webhook-secret",json.dumps(metadata.json))
+        wrong=self.client.post("/api/integrations/index-ring/reveal",json={"password":"wrong"},headers=headers)
+        self.assertEqual(wrong.status_code,401)
+        revealed=self.client.post("/api/integrations/index-ring/reveal",
+          json={"password":"correct horse battery staple"},headers=headers)
+        self.assertEqual(revealed.json["secret"],"test-webhook-secret")
+        rotated=self.client.post("/api/integrations/index-ring/rotate",
+          json={"password":"correct horse battery staple"},headers=headers)
+        self.assertEqual(rotated.status_code,200)
+        replacement=rotated.json["secret"]
+        self.assertNotEqual(replacement,"test-webhook-secret")
+        old=self.client.post("/webhook/index",json={"transcription":"old secret"},
+          headers={"X-Webhook-Secret":"test-webhook-secret"})
+        device=self.device_login()
+        new=self.client.post("/webhook/index",json={"transcription":"new secret"},
+          headers={"X-Webhook-Secret":replacement,"Authorization":f"Bearer {device.json['token']}"})
+        self.assertEqual(old.status_code,401)
+        self.assertEqual(new.status_code,201)
 
     def test_explicit_group_creation_and_prefix_matching(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}

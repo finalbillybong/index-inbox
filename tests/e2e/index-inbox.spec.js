@@ -30,7 +30,7 @@ test.describe.serial('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.1.0');
+    await expect(page.locator('.version')).toHaveText('v1.2.0');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
@@ -48,6 +48,19 @@ test.describe.serial('Index Inbox browser flows', () => {
     await button.click();
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toBe('index-inbox.apk');
+  });
+
+  test('Index Ring integration reveals the webhook secret after password confirmation', async ({ page }) => {
+    await login(page);
+    await page.locator('#integrations-open').click();
+    await expect(page.locator('.index-ring-integration')).toContainText('X-Webhook-Secret');
+    await expect(page.locator('#index-ring-url')).toHaveValue('http://127.0.0.1:5055/webhook/index');
+    await page.getByRole('button', { name: 'Reveal' }).click();
+    await page.locator('#confirm-input').fill(password);
+    await page.locator('#confirm-ok').click();
+    await expect(page.locator('#index-ring-secret')).toHaveValue('playwright-webhook-secret');
+    await page.getByRole('button', { name: 'Send test capture' }).click();
+    await expect(page.locator('#info')).toContainText('Test capture added to the inbox.');
   });
 
   test('group lifecycle and suggestions require confirmation', async ({ page, request }) => {

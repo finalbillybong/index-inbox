@@ -55,6 +55,10 @@ Firebase is the easier option for users who prefer a managed authentication serv
 
 Existing installations continue to use Firebase when `AUTH_PROVIDER` is omitted. New installations should choose a mode explicitly.
 
+Index Inbox is a single-user/shared-instance application. Multiple credentials
+can be created, but every authenticated account sees the same inbox and has the
+same trusted administrative access; there are no per-user inboxes or roles.
+
 ## Requirements
 
 - Docker Engine with Docker Compose
@@ -74,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/finalbillybong/index-inbox/main/set
 
 The helper downloads `compose.yaml`, generates independent webhook and setup secrets, creates `.env`, pulls the latest GHCR image and starts the service. It prints the one-time setup token.
 
-Open the HTTPS origin and create the first owner using that token, a username and a password of at least 12 characters. Then remove the `LOCAL_SETUP_TOKEN` line from `.env` and recreate the container:
+Open the HTTPS origin and create the first account using that token, a username and a password of at least 12 characters. Then remove the `LOCAL_SETUP_TOKEN` line from `.env` and recreate the container:
 
 ```bash
 docker compose up -d --force-recreate
@@ -94,7 +98,7 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `WEBHOOK_SECRET` | Yes | Random secret used to authenticate incoming Index webhooks |
+| `WEBHOOK_SECRET` | Yes | Initial secret used to authenticate incoming Index webhooks; an in-app rotation persists in `/data` and takes precedence |
 | `AUTH_PROVIDER` | Yes | `local` for self-hosted accounts or `firebase` for Firebase Authentication |
 | `AUTH_ALLOWED_ORIGINS` | Local | Comma-separated allowed browser origins, including scheme and port |
 | `AUTH_EXPECTED_ORIGIN` | Local | Deprecated single-origin setting retained for compatibility |
@@ -104,7 +108,7 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 | `AUTH_DEVICE_DAYS` | Local | Lifetime of a native-app device token, default 90 days |
 | `TRUSTED_PROXY_HOPS` | No | Number of trusted forwarding hops; defaults to `0`, which ignores forwarded client-IP headers |
 | `TRUSTED_PROXY_CIDRS` | Proxy trust | Comma-separated IP networks allowed to supply forwarded client addresses |
-| `LOCAL_SETUP_TOKEN` | Local setup | One-time secret required to create the first owner through the browser |
+| `LOCAL_SETUP_TOKEN` | Local setup | One-time secret required to create the first account through the browser |
 | `FIREBASE_PROJECT_ID` | Firebase | Firebase project identifier |
 | `FIREBASE_API_KEY` | Firebase | Firebase web application API key |
 | `FIREBASE_AUTH_DOMAIN` | Firebase | Usually `PROJECT_ID.firebaseapp.com` |
@@ -168,7 +172,7 @@ Local mode keeps account credentials and sessions in the same SQLite database as
    docker compose up -d
    ```
 
-   Put the generated value in `LOCAL_SETUP_TOKEN`, open Index Inbox, and use it on the first-run screen to create the owner account. Web setup is permanently unavailable after the first local user exists. Remove `LOCAL_SETUP_TOKEN` from `.env` afterward and recreate the container with `docker compose up -d --force-recreate`.
+   Put the generated value in `LOCAL_SETUP_TOKEN`, open Index Inbox, and use it on the first-run screen to create the first account. Web setup is permanently unavailable after the first local user exists. Remove `LOCAL_SETUP_TOKEN` from `.env` afterward and recreate the container with `docker compose up -d --force-recreate`.
 
    Alternatively, leave `LOCAL_SETUP_TOKEN` empty and create the first account interactively with `docker exec -it index-inbox flask auth create-user`. Passwords must be at least 12 characters and are hashed with Argon2id. Passwords are never supplied through environment variables or command arguments.
 
@@ -247,7 +251,7 @@ Secure cookies require HTTPS. If the Cloudflare URL uses HTTPS but the LAN addre
 
 ### After first-run setup
 
-Once the owner account works, harden the production configuration:
+Once the first account works, harden the production configuration:
 
 1. Remove `LOCAL_SETUP_TOKEN` from `.env`. The browser setup endpoint is already disabled after the first user exists, but the bootstrap secret is no longer needed.
 2. Set `AUTH_COOKIE_SECURE=true` when accessing Index Inbox through HTTPS.
@@ -320,6 +324,16 @@ docker exec index-inbox python -c "import app; u=app.auth.get_user_by_email('you
 Sign out and back in afterward so Firebase issues a fresh ID token.
 
 ## Pebble webhook setup
+
+Signed-in users can open **Index Ring** in the web app, or **Storage, backups &
+settings** in the Android app, to copy the webhook URL and reveal the current
+secret. Local authentication requires the current account password before
+revealing or rotating it.
+
+Rotating the secret invalidates the previous value immediately. The replacement
+is stored in the persistent Index Inbox database, survives container updates and
+takes precedence over `WEBHOOK_SECRET` in `.env`. Update the Pebble app as soon as
+the rotation completes.
 
 In the Pebble mobile app, create an Index webhook using:
 
