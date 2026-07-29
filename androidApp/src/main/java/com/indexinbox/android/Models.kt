@@ -171,6 +171,21 @@ data class RetentionRequest(val audioDays: Int)
 data class RetentionResult(val ok: Boolean, val removed: Int)
 
 @Serializable
+data class IndexRingIntegration(
+    val webhookPath: String,
+    val webhookUrl: String,
+    val configured: Boolean,
+    val maskedSecret: String,
+    val requiresPassword: Boolean,
+)
+
+@Serializable
+data class IntegrationPasswordRequest(val password: String = "")
+
+@Serializable
+data class IntegrationSecret(val secret: String)
+
+@Serializable
 data class DeviceSession(
     val deviceName: String,
     val createdAt: String,

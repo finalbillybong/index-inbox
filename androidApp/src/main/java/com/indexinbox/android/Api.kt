@@ -14,6 +14,7 @@ import retrofit2.converter.kotlinx.serialization.asConverterFactory
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.Multipart
 import retrofit2.http.Part
 import retrofit2.http.PATCH
@@ -128,6 +129,18 @@ interface IndexApi {
 
     @POST("api/backup-hook")
     suspend fun triggerBackupHook(): ApiResult
+
+    @GET("api/integrations/index-ring")
+    suspend fun indexRingIntegration(): IndexRingIntegration
+
+    @POST("api/integrations/index-ring/reveal")
+    suspend fun revealIndexRingSecret(@Body request: IntegrationPasswordRequest): IntegrationSecret
+
+    @POST("api/integrations/index-ring/rotate")
+    suspend fun rotateIndexRingSecret(@Body request: IntegrationPasswordRequest): IntegrationSecret
+
+    @POST("webhook/index")
+    suspend fun testIndexRing(@Header("X-Webhook-Secret") secret: String, @Body capture: ManualCapture): ApiResult
 
     @Streaming
     @GET("api/entries/{id}/audio")

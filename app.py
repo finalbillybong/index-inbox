@@ -91,6 +91,7 @@ def init_db():
         dismissed_at TEXT NOT NULL, PRIMARY KEY(entry_id,group_name));
       CREATE TABLE IF NOT EXISTS backup_runs (id TEXT PRIMARY KEY,requested_at TEXT NOT NULL,completed_at TEXT,
         status TEXT NOT NULL,archive_name TEXT,archive_bytes INTEGER,error TEXT NOT NULL DEFAULT '');
+      CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
     """)
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
@@ -131,6 +132,15 @@ def request_client_addresses():
     except ValueError:return peer,peer
 
 def session_token_hash(token): return hashlib.sha256(token.encode()).hexdigest()
+
+def current_webhook_secret():
+    row=db().execute("SELECT value FROM app_settings WHERE key='webhook_secret'").fetchone()
+    return row["value"] if row else WEBHOOK_SECRET
+
+def set_webhook_secret(value):
+    db().execute("""INSERT INTO app_settings(key,value,updated_at) VALUES('webhook_secret',?,?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at""",(value,now()))
+    db().commit()
 
 def local_user():
     token=request.cookies.get(AUTH_COOKIE,"")
@@ -330,9 +340,48 @@ def local_logout():
 
 def webhook_authorized():
     supplied = request.headers.get("X-Webhook-Secret", ""); bearer = request.headers.get("Authorization", "")
-    if bearer.startswith("Bearer "): supplied = bearer[7:]
+    if not supplied and bearer.startswith("Bearer "): supplied = bearer[7:]
     supplied = request.args.get("token", supplied)
-    return bool(WEBHOOK_SECRET) and secrets.compare_digest(supplied, WEBHOOK_SECRET)
+    configured=current_webhook_secret()
+    return bool(configured) and secrets.compare_digest(supplied, configured)
+
+def confirm_integration_password(body):
+    if AUTH_PROVIDER!="local":return None
+    password=str(body.get("password",""))
+    source,peer=request_client_addresses()
+    user,error,status=authenticate_local_credentials(g.user["username"],password,source,peer)
+    if error:return error,status
+    if str(user["id"])!=g.user["id"]:return jsonify(error="Password confirmation failed"),403
+    return None
+
+@app.get("/api/integrations/index-ring")
+@api_auth
+def index_ring_integration():
+    configured=current_webhook_secret()
+    return jsonify(webhookPath="/webhook/index",webhookUrl=request.url_root.rstrip("/")+"/webhook/index",configured=bool(configured),
+      maskedSecret=("••••"+configured[-4:]) if configured else "",
+      requiresPassword=AUTH_PROVIDER=="local")
+
+@app.post("/api/integrations/index-ring/reveal")
+@api_auth
+def reveal_index_ring_secret():
+    body=request.get_json(silent=True) or {}
+    confirmation=confirm_integration_password(body)
+    if confirmation:return confirmation
+    configured=current_webhook_secret()
+    if not configured:return jsonify(error="Webhook secret is not configured"),503
+    response=jsonify(secret=configured);response.headers["Cache-Control"]="no-store";return response
+
+@app.post("/api/integrations/index-ring/rotate")
+@api_auth
+def rotate_index_ring_secret():
+    body=request.get_json(silent=True) or {}
+    confirmation=confirm_integration_password(body)
+    if confirmation:return confirmation
+    value=secrets.token_urlsafe(32)
+    set_webhook_secret(value)
+    log_activity("info","webhook_secret_rotated","Index Ring webhook secret rotated")
+    response=jsonify(secret=value);response.headers["Cache-Control"]="no-store";return response
 
 def first(payload, names, default=""):
     for name in names:
