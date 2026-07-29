@@ -64,6 +64,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -143,6 +144,7 @@ data class AppState(
     val notificationsEnabled: Boolean = true,
     val instantNotifications: Boolean = true,
     val widgetCaptureMode: String = "instant",
+    val widgetCaptureCategory: String = "note",
     val syncStatus: String = "Saved notes available offline",
 )
 
@@ -155,7 +157,7 @@ class IndexViewModel(
     val entries = dao.observeInbox().catch { emit(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val pendingCaptures=pendingDao.observeAll().stateIn(viewModelScope,SharingStarted.WhileSubscribed(5_000),emptyList())
-    private val _state = MutableStateFlow(AppState(authenticated=auth.token!=null,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode))
+    private val _state = MutableStateFlow(AppState(authenticated=auth.token!=null,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory))
     val state: StateFlow<AppState> = _state
     private val _groups = MutableStateFlow<List<NoteGroup>>(emptyList())
     val groups: StateFlow<List<NoteGroup>> = _groups
@@ -173,6 +175,8 @@ class IndexViewModel(
     val devices: StateFlow<List<DeviceSession>> = _devices
     private val _appUpdate = MutableStateFlow<AndroidUpdate?>(null)
     val appUpdate: StateFlow<AndroidUpdate?> = _appUpdate
+    private val _updateDownloadProgress = MutableStateFlow<Int?>(null)
+    val updateDownloadProgress: StateFlow<Int?> = _updateDownloadProgress
     private val _indexRingIntegration = MutableStateFlow<IndexRingIntegration?>(null)
     val indexRingIntegration: StateFlow<IndexRingIntegration?> = _indexRingIntegration
     private val _indexRingSecret = MutableStateFlow<String?>(null)
@@ -202,7 +206,7 @@ class IndexViewModel(
                 SyncWorker.schedule(getApplication())
                 PendingCaptureWorker.schedule(getApplication())
                 if(auth.notificationsEnabled&&auth.instantNotifications)InstantSyncService.start(getApplication())
-                _state.value=AppState(authenticated=true,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode)
+                _state.value=AppState(authenticated=true,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory)
                 CaptureWidgetProvider.updateAll(getApplication())
                 refresh()
             } catch(error:Exception) {
@@ -283,6 +287,12 @@ class IndexViewModel(
         if (mode !in setOf("instant", "review")) return
         auth.setWidgetCaptureMode(mode)
         _state.value = _state.value.copy(widgetCaptureMode = mode)
+        CaptureWidgetProvider.updateAll(getApplication())
+    }
+    fun setWidgetCaptureCategory(category: String) {
+        if (category !in setOf("note", "task", "idea", "question")) return
+        auth.setWidgetCaptureCategory(category)
+        _state.value = _state.value.copy(widgetCaptureCategory = category)
         CaptureWidgetProvider.updateAll(getApplication())
     }
     fun setFilter(filter: String) { _state.value = _state.value.copy(inboxFilter = filter) }
@@ -463,13 +473,28 @@ class IndexViewModel(
     fun installUpdate() {
         val update=_appUpdate.value?.takeIf{it.available&&it.versionCode>BuildConfig.VERSION_CODE}?:return
         val server=auth.serverUrl?:return;val token=auth.token?:return
-        viewModelScope.launch { busy {
+        viewModelScope.launch {
+            _state.value = _state.value.copy(loading = true, error = null)
+            _updateDownloadProgress.value = 0
+            try {
             val context=getApplication<Application>()
             val directory=File(context.getExternalFilesDir(null),"updates").apply{mkdirs()}
             val target=File(directory,"index-inbox-${update.versionCode}.apk")
             withContext(Dispatchers.IO) {
-                ApiFactory.create(server,token).androidUpdateApk().byteStream().use { input ->
-                    target.outputStream().use { output -> input.copyTo(output) }
+                val body=ApiFactory.create(server,token).androidUpdateApk()
+                val total=update.bytes.takeIf{it>0} ?: body.contentLength().takeIf{it>0} ?: 0L
+                body.byteStream().use { input ->
+                    target.outputStream().use { output ->
+                        val buffer=ByteArray(64*1024)
+                        var downloaded=0L
+                        while(true) {
+                            val count=input.read(buffer)
+                            if(count<0)break
+                            output.write(buffer,0,count)
+                            downloaded+=count
+                            if(total>0) _updateDownloadProgress.value=downloadProgress(downloaded,total)
+                        }
+                    }
                 }
             }
             val digest=withContext(Dispatchers.IO) {
@@ -485,12 +510,19 @@ class IndexViewModel(
                 hash.digest().joinToString(""){"%02x".format(it)}
             }
             if(!digest.equals(update.sha256,ignoreCase=true)){target.delete();throw IOException("Downloaded update failed its checksum")}
+            _updateDownloadProgress.value=100
             val uri=FileProvider.getUriForFile(context,"${context.packageName}.files",target)
             context.startActivity(Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri,"application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
             })
-        } }
+            } catch(error:Exception) {
+                _state.value=_state.value.copy(error=error.message?:"Update download failed")
+            } finally {
+                _state.value=_state.value.copy(loading=false)
+                _updateDownloadProgress.value=null
+            }
+        }
     }
 
     fun revokeOtherDevices() {
@@ -695,7 +727,7 @@ class IndexViewModel(
             SyncWorker.cancel(getApplication())
             InstantSyncService.stop(getApplication())
             CaptureWidgetProvider.updateAll(getApplication())
-            _state.value=AppState(darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode)
+            _state.value=AppState(darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory)
         }
     }
 
@@ -762,6 +794,7 @@ class MainActivity : ComponentActivity() {
         when (intent?.action) {
             ACTION_WIDGET_SETUP -> {
                 if (viewModel.state.value.authenticated) {
+                    SharedCapture.category = AuthStore(this).widgetCaptureCategory
                     SharedCapture.audioPath = CaptureWidgetState.file(this)?.let(::File)?.takeIf(File::exists)?.absolutePath
                     SharedCapture.status = if (SharedCapture.audioPath == null) {
                         "Grant microphone access, then record once to finish widget setup."
@@ -775,6 +808,7 @@ class MainActivity : ComponentActivity() {
             ACTION_WIDGET_REVIEW -> {
                 AudioCaptureService.finishForReview(this)?.let {
                     SharedCapture.audioPath = it.absolutePath
+                    SharedCapture.category = AuthStore(this).widgetCaptureCategory
                     SharedCapture.status = "Transcribing on your server…"
                     viewModel.showCapture(true)
                 }
@@ -793,6 +827,7 @@ private object SharedCapture {
     var text: String = ""
     var audioPath: String? = null
     var status: String = ""
+    var category: String = "note"
 }
 
 internal fun filterInboxEntries(
@@ -841,6 +876,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
     val aliases by viewModel.aliases.collectAsState()
     val devices by viewModel.devices.collectAsState()
     val appUpdate by viewModel.appUpdate.collectAsState()
+    val updateDownloadProgress by viewModel.updateDownloadProgress.collectAsState()
     val indexRingIntegration by viewModel.indexRingIntegration.collectAsState()
     val indexRingSecret by viewModel.indexRingSecret.collectAsState()
     val pending by viewModel.pendingCaptures.collectAsState()
@@ -888,11 +924,13 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             serverStatus, state.loading,
             devices=devices,
             appUpdate=appUpdate,
+            updateDownloadProgress=updateDownloadProgress,
             indexRingIntegration=indexRingIntegration,
             indexRingSecret=indexRingSecret,
             notificationsEnabled=state.notificationsEnabled,
             instantNotifications=state.instantNotifications,
             widgetCaptureMode=state.widgetCaptureMode,
+            widgetCaptureCategory=state.widgetCaptureCategory,
             onBack={viewModel.showScreen("inbox")},
             onBackup=viewModel::createBackup,
             onRetention=viewModel::runRetention,
@@ -902,6 +940,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onNotifications=viewModel::setNotifications,
             onInstantNotifications=viewModel::setInstantNotifications,
             onWidgetCaptureMode=viewModel::setWidgetCaptureMode,
+            onWidgetCaptureCategory=viewModel::setWidgetCaptureCategory,
             onRevokeOthers=viewModel::revokeOtherDevices,
             onCheckUpdate=viewModel::checkForUpdate,
             onInstallUpdate=viewModel::installUpdate,
@@ -921,17 +960,18 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             initial = SharedCapture.text,
             initialAudio = SharedCapture.audioPath?.let(::File)?.takeIf(File::exists),
             initialStatus = SharedCapture.status,
+            initialCategory = SharedCapture.category,
             loading = state.loading,
             onClose = {
                 val widgetAudio = SharedCapture.audioPath != null
-                SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""
+                SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"
                 if (widgetAudio) CaptureWidgetState.set(viewModel.getApplication(), "ready")
                 viewModel.showCapture(false)
             },
-            onSave = { title, text, category -> SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; viewModel.capture(text, title,category) },
+            onSave = { title, text, category -> SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"; viewModel.capture(text, title,category) },
             onSaveAudio = { title, text, category, file ->
                 val widgetAudio = SharedCapture.audioPath != null
-                SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""
+                SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"
                 if (widgetAudio) CaptureWidgetState.set(viewModel.getApplication(), "ready")
                 viewModel.captureAudio(file, text,title,category)
             },
@@ -1574,11 +1614,13 @@ private fun StatusScreen(
     loading: Boolean,
     devices: List<DeviceSession>,
     appUpdate: AndroidUpdate?,
+    updateDownloadProgress: Int?,
     indexRingIntegration: IndexRingIntegration?,
     indexRingSecret: String?,
     notificationsEnabled: Boolean,
     instantNotifications: Boolean,
     widgetCaptureMode: String,
+    widgetCaptureCategory: String,
     onBack: () -> Unit,
     onBackup: () -> Unit,
     onRetention: (Int) -> Unit,
@@ -1588,6 +1630,7 @@ private fun StatusScreen(
     onNotifications: (Boolean) -> Unit,
     onInstantNotifications: (Boolean) -> Unit,
     onWidgetCaptureMode: (String) -> Unit,
+    onWidgetCaptureCategory: (String) -> Unit,
     onRevokeOthers: () -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -1676,8 +1719,20 @@ private fun StatusScreen(
             Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick=onCheckUpdate,enabled=!loading){Text("Check")}
                 if(appUpdate?.available==true&&appUpdate.versionCode>BuildConfig.VERSION_CODE) {
-                    Button(onClick=onInstallUpdate,enabled=!loading){Text("Download & install")}
+                    Button(onClick=onInstallUpdate,enabled=!loading){
+                        Text(updateDownloadProgress?.let{"Downloading $it%"} ?: "Download & install")
+                    }
                 }
+            }
+            updateDownloadProgress?.let { progress ->
+                LinearProgressIndicator(
+                    progress={progress/100f},
+                    modifier=Modifier.fillMaxWidth(),
+                )
+                Text(
+                    if(progress<100)"Downloading update… $progress%" else "Download complete. Verifying installer…",
+                    style=MaterialTheme.typography.labelSmall,
+                )
             }
             HorizontalDivider()
             Text("Notifications",fontWeight=FontWeight.Bold)
@@ -1712,6 +1767,16 @@ private fun StatusScreen(
                 else "The second tap opens the transcript so you can correct it before saving.",
                 style=MaterialTheme.typography.labelSmall,
             )
+            Text("Default category",fontWeight=FontWeight.Bold)
+            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                listOf("note","task","idea","question").forEach { category ->
+                    FilterChip(
+                        selected=widgetCaptureCategory==category,
+                        onClick={onWidgetCaptureCategory(category)},
+                        label={Text(category.replaceFirstChar(Char::uppercase))},
+                    )
+                }
+            }
             HorizontalDivider()
             Text("Signed-in devices",fontWeight=FontWeight.Bold)
             devices.forEach { device ->
@@ -1838,6 +1903,7 @@ private fun CaptureScreen(
     initial: String,
     initialAudio: File? = null,
     initialStatus: String = "",
+    initialCategory: String = "note",
     loading: Boolean,
     onClose: () -> Unit,
     onSave: (String, String, String) -> Unit,
@@ -1847,7 +1913,7 @@ private fun CaptureScreen(
     val context = LocalContext.current
     var title by remember { mutableStateOf("") }
     var text by remember(initial) { mutableStateOf(initial) }
-    var category by remember { mutableStateOf("note") }
+    var category by remember(initialCategory) { mutableStateOf(initialCategory) }
     var recorder by remember { mutableStateOf<MediaRecorder?>(null) }
     var recordingFile by remember(initialAudio) { mutableStateOf(initialAudio) }
     var isRecording by remember { mutableStateOf(false) }
@@ -1966,6 +2032,9 @@ private fun CaptureScreen(
 private fun formatDate(value: String): String = runCatching {
     OffsetDateTime.parse(value).format(DateTimeFormatter.ofPattern("d MMM yyyy, HH:mm"))
 }.getOrDefault(value)
+
+internal fun downloadProgress(downloaded:Long,total:Long):Int =
+    if(total<=0)0 else (downloaded*100/total).coerceIn(0,100).toInt()
 
 private fun formatBytes(value: Long): String = when {
     value < 1_024 -> "$value B"

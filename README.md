@@ -154,6 +154,9 @@ After installing the Android app, sign in and grant microphone access from **Cap
 
 Choose **Instant save** or **Review first** under **Storage & backup → Home-screen audio widget** in the Android app.
 The widget uses the same **Light**, **Dark**, or **Follow OS** appearance selected in the app.
+Its default capture category can be set to **Note**, **Task**, **Idea**, or **Question** in the same settings section.
+
+Android new-note notifications include the saved note content when available and provide **Archive**, **Star**, **Processed**, and **Delete** quick actions. APK updates show live download progress before Android opens the installer.
 
 ## Local authentication setup
 

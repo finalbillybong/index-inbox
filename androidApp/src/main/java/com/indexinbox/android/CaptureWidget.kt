@@ -85,6 +85,8 @@ class CaptureWidgetProvider : AppWidgetProvider() {
             val auth = AuthStore(context)
             val status = CaptureWidgetState.status(context)
             val dark = widgetUsesDarkTheme(auth.themeMode, context.resources.configuration.uiMode)
+            val category = auth.widgetCaptureCategory.replaceFirstChar(Char::uppercase)
+            val categoryWithArticle = if (auth.widgetCaptureCategory == "idea") "an $category" else "a $category"
             val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
             val ready = auth.token != null && hasMic
@@ -92,10 +94,10 @@ class CaptureWidgetProvider : AppWidgetProvider() {
                 !ready -> "Set up Index Inbox" to if (auth.token == null) "Tap to sign in" else "Tap to enable microphone"
                 status == "recording" -> "Recording…" to "Tap to stop"
                 status == "uploading" -> "Uploading…" to "Your note is being saved"
-                status == "saved" -> "Saved" to "Tap to record another note"
+                status == "saved" -> "Saved" to "Tap to record another $category"
                 status == "queued" -> "Saved offline" to "Upload will retry automatically"
                 status == "error" -> "Recording not sent" to CaptureWidgetState.detail(context).ifBlank { "Tap to open Index Inbox" }
-                else -> "Index Inbox" to "Tap to record"
+                else -> "Index Inbox" to "Tap to record $categoryWithArticle"
             }
             val intent = when {
                 !ready || status == "error" -> Intent(context, MainActivity::class.java).apply {
@@ -299,7 +301,7 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
             id = UUID.randomUUID().toString(),
             title = "",
             transcription = "",
-            category = "note",
+            category = auth.widgetCaptureCategory,
             audioPath = file.absolutePath,
             createdAt = System.currentTimeMillis(),
         )
