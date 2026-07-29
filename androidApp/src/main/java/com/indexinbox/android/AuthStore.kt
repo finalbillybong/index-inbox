@@ -21,6 +21,7 @@ class AuthStore(context: Context) {
     val notificationsEnabled: Boolean get() = prefs.getBoolean("notifications_enabled", true)
     val instantNotifications: Boolean get() = prefs.getBoolean("instant_notifications", true)
     val widgetCaptureMode: String get() = prefs.getString("widget_capture_mode", "instant") ?: "instant"
+    val widgetCaptureCategory: String get() = prefs.getString("widget_capture_category", "note") ?: "note"
 
     fun save(serverUrl: String, token: String) {
         prefs.edit().putString("server_url", normalizeUrl(serverUrl)).putString("token", token).apply()
@@ -31,6 +32,7 @@ class AuthStore(context: Context) {
     fun setNotificationsEnabled(enabled: Boolean) = prefs.edit().putBoolean("notifications_enabled", enabled).apply()
     fun setInstantNotifications(enabled: Boolean) = prefs.edit().putBoolean("instant_notifications", enabled).apply()
     fun setWidgetCaptureMode(mode: String) = prefs.edit().putString("widget_capture_mode", mode).apply()
+    fun setWidgetCaptureCategory(category: String) = prefs.edit().putString("widget_capture_category", category).apply()
 
     fun clear() = prefs.edit().remove("server_url").remove("token").apply()
 
