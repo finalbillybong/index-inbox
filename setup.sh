@@ -33,7 +33,7 @@ setup_token="$(openssl rand -hex 32)"
 
 mkdir -p "$data_path"
 docker compose pull
-docker compose run --rm --no-deps --user 0 --entrypoint chown index-inbox 1000:1000 /data
+docker compose run --rm --no-deps -T --user 0 --entrypoint chown index-inbox 1000:1000 /data </dev/null
 docker compose up -d
 
 echo
