@@ -1206,7 +1206,11 @@ private fun EntryScreen(
             },
         )
     }) { padding ->
-        Column(Modifier.padding(padding).padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(
+            Modifier.padding(padding).verticalScroll(rememberScrollState())
+                .padding(start=18.dp,end=18.dp,top=18.dp,bottom=40.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
             OutlinedTextField(title, { title = it }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(text, { text = it }, label = { Text("Transcription") }, minLines = 7, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(tags, { tags = it }, label = { Text("Tags") }, modifier = Modifier.fillMaxWidth())
@@ -1236,9 +1240,15 @@ private fun EntryScreen(
                 AudioPlayer(audioSource.first,audioSource.second)
                 OutlinedButton(onClick={audioDownload.launch(entry.audioPath)}){Text("Download audio")}
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedButton(onClick = { onSave(EntryUpdate(archived = true)) }) { Icon(Icons.Default.Archive, null); Text(" Archive") }
-                OutlinedButton(onClick = {confirmDelete=true}) { Icon(Icons.Default.Delete, null); Text(" Delete") }
+            Row(Modifier.fillMaxWidth(),horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
+                    onClick = { onSave(EntryUpdate(archived = entry.archived==0)) },
+                    modifier=Modifier.weight(1f),
+                ) { Icon(Icons.Default.Archive, null); Text(if(entry.archived==1)" Restore" else " Archive") }
+                OutlinedButton(
+                    onClick = {confirmDelete=true},
+                    modifier=Modifier.weight(1f),
+                ) { Icon(Icons.Default.Delete, null); Text(" Delete") }
             }
         }
     }
