@@ -113,6 +113,31 @@ test.describe.serial('Index Inbox browser flows', () => {
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' }).getByRole('button', { name: 'Timeline' })).toBeVisible();
   });
 
+  test('Android mobile header offers only the APK action', async ({ page }) => {
+    await page.addInitScript(() => Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (Linux; Android 16; Pixel 9) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36',
+    }));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login(page);
+    await expect(page.locator('#android-install')).toHaveText('↓ Android APK');
+    await expect(page.locator('#android-install')).toBeVisible();
+    await expect(page.locator('#install')).toBeHidden();
+  });
+
+  test('iOS mobile header offers PWA instructions instead of the APK', async ({ page }) => {
+    await page.addInitScript(() => Object.defineProperty(navigator, 'userAgent', {
+      configurable: true,
+      value: 'Mozilla/5.0 (iPhone; CPU iPhone OS 19_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148 Safari/604.1',
+    }));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login(page);
+    await expect(page.locator('#android-install')).toBeHidden();
+    await expect(page.locator('#install')).toHaveText('Install PWA');
+    await page.locator('#install').click();
+    await expect(page.locator('#info')).toContainText('Add to Home Screen');
+  });
+
   test('browser audio recording is previewed and transcribed', async ({ page }) => {
     await page.addInitScript(() => {
       Object.defineProperty(navigator, 'mediaDevices', {
