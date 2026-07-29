@@ -153,6 +153,7 @@ After installing the Android app, sign in and grant microphone access from **Cap
 - If the server is temporarily unreachable, Instant-save recordings are retained locally and use the existing pending-capture retry queue.
 
 Choose **Instant save** or **Review first** under **Storage & backup → Home-screen audio widget** in the Android app.
+The widget uses the same **Light**, **Dark**, or **Follow OS** appearance selected in the app.
 
 ## Local authentication setup
 

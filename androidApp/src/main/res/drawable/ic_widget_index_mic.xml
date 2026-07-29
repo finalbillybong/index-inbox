@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="32dp"
+    android:height="32dp"
+    android:viewportWidth="32"
+    android:viewportHeight="32">
+    <!-- The Index Inbox ring -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M16,2.75a13.25,13.25 0,1 0,0 26.5a13.25,13.25 0,1 0,0 -26.5"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="3.25" />
+    <!-- Microphone capsule, containing the original central dot -->
+    <path
+        android:fillColor="#FF000000"
+        android:fillType="evenOdd"
+        android:pathData="M16,7.25c-2.35,0 -4.25,1.9 -4.25,4.25v5.25c0,2.35 1.9,4.25 4.25,4.25s4.25,-1.9 4.25,-4.25V11.5c0,-2.35 -1.9,-4.25 -4.25,-4.25zM16,12.25a1.75,1.75 0,1 0,0 3.5a1.75,1.75 0,1 0,0 -3.5" />
+    <!-- Microphone cradle and stem -->
+    <path
+        android:fillColor="#FF000000"
+        android:pathData="M9.5,16h2c0,2.76 2.02,4.75 4.5,4.75s4.5,-1.99 4.5,-4.75h2c0,3.45 -2.36,6.07 -5.5,6.64V25h2.75v2H12.25v-2H15v-2.36C11.86,22.07 9.5,19.45 9.5,16z" />
+</vector>

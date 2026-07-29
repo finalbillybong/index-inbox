@@ -13,7 +13,7 @@
         android:layout_width="32dp"
         android:layout_height="32dp"
         android:contentDescription="@string/capture_widget_action"
-        android:src="@drawable/ic_widget_mic"
+        android:src="@drawable/ic_widget_index_mic"
         android:tint="#315C49" />
 
     <LinearLayout
