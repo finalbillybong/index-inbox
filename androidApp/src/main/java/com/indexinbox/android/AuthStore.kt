@@ -1,0 +1,38 @@
+package com.indexinbox.android
+
+import android.content.Context
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
+
+class AuthStore(context: Context) {
+    private val prefs = EncryptedSharedPreferences.create(
+        context,
+        "index_credentials",
+        MasterKey.Builder(context).setKeyScheme(MasterKey.KeyScheme.AES256_GCM).build(),
+        EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+        EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+    )
+
+    val serverUrl: String? get() = prefs.getString("server_url", null)
+    val token: String? get() = prefs.getString("token", null)
+    val darkMode: Boolean get() = prefs.getBoolean("dark_mode", false)
+    val themeMode: String get() = prefs.getString("theme_mode", null)
+        ?: if (prefs.contains("dark_mode")) if (darkMode) "dark" else "light" else "system"
+    val notificationsEnabled: Boolean get() = prefs.getBoolean("notifications_enabled", true)
+    val instantNotifications: Boolean get() = prefs.getBoolean("instant_notifications", true)
+
+    fun save(serverUrl: String, token: String) {
+        prefs.edit().putString("server_url", normalizeUrl(serverUrl)).putString("token", token).apply()
+    }
+
+    fun setDarkMode(enabled: Boolean) = prefs.edit().putBoolean("dark_mode", enabled).apply()
+    fun setThemeMode(mode: String) = prefs.edit().putString("theme_mode", mode).apply()
+    fun setNotificationsEnabled(enabled: Boolean) = prefs.edit().putBoolean("notifications_enabled", enabled).apply()
+    fun setInstantNotifications(enabled: Boolean) = prefs.edit().putBoolean("instant_notifications", enabled).apply()
+
+    fun clear() = prefs.edit().remove("server_url").remove("token").apply()
+
+    companion object {
+        fun normalizeUrl(value: String) = value.trim().trimEnd('/') + "/"
+    }
+}

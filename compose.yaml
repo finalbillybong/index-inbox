@@ -1,6 +1,6 @@
 services:
   index-inbox:
-    build: .
+    image: ghcr.io/finalbillybong/index-inbox:${INDEX_INBOX_VERSION:-latest}
     container_name: index-inbox
     restart: unless-stopped
     ports:
@@ -14,6 +14,7 @@ services:
       AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-}
       LOCAL_SETUP_TOKEN: ${LOCAL_SETUP_TOKEN:-}
       AUTH_SESSION_DAYS: ${AUTH_SESSION_DAYS:-30}
+      AUTH_DEVICE_DAYS: ${AUTH_DEVICE_DAYS:-90}
       AUTH_IDLE_DAYS: ${AUTH_IDLE_DAYS:-7}
       TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-0}
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}

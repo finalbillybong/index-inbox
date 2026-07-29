@@ -41,6 +41,7 @@ class LocalAuthTests(unittest.TestCase):
     def setUp(self):
         with self.module.app.app_context():
             self.module.db().execute("DELETE FROM local_sessions")
+            self.module.db().execute("DELETE FROM local_device_tokens")
             self.module.db().execute("DELETE FROM login_attempts")
             self.module.db().commit()
         self.client.delete_cookie("index_session")
@@ -85,6 +86,70 @@ class LocalAuthTests(unittest.TestCase):
             headers={"Origin": "http://localhost", "X-CSRF-Token": login.json["csrfToken"]},
         )
         self.assertEqual(with_csrf.status_code, 201)
+
+    def device_login(self, device_name="Test phone"):
+        return self.client.post(
+            "/auth/device/login",
+            json={"username": "owner", "password": "correct horse battery staple", "deviceName": device_name},
+        )
+
+    def test_device_login_bearer_access_and_logout(self):
+        login=self.device_login()
+        self.assertEqual(login.status_code,201)
+        self.assertNotIn("Set-Cookie",login.headers)
+        headers={"Authorization":f"Bearer {login.json['token']}"}
+        session=self.client.get("/auth/device/session",headers=headers)
+        self.assertEqual(session.status_code,200)
+        self.assertEqual(session.json["deviceName"],"Test phone")
+        capture=self.client.post("/api/manual",json={"transcription":"native capture"},headers=headers)
+        self.assertEqual(capture.status_code,201)
+        logout=self.client.post("/auth/device/logout",headers=headers)
+        self.assertEqual(logout.status_code,200)
+        self.assertEqual(self.client.get("/api/entries",headers=headers).status_code,401)
+
+    def test_device_token_is_hashed_and_wrong_token_is_rejected(self):
+        login=self.device_login()
+        with self.module.app.app_context():
+            row=self.module.db().execute("SELECT token_hash FROM local_device_tokens").fetchone()
+        self.assertNotEqual(row["token_hash"],login.json["token"])
+        self.assertEqual(row["token_hash"],self.module.session_token_hash(login.json["token"]))
+        self.assertEqual(self.client.get("/api/entries",headers={"Authorization":"Bearer wrong"}).status_code,401)
+
+    def test_device_token_expiry_and_session_version_revoke_access(self):
+        login=self.device_login(); headers={"Authorization":f"Bearer {login.json['token']}"}
+        with self.module.app.app_context():
+            self.module.db().execute("UPDATE local_device_tokens SET expires_at=?",(self.module.now(),)); self.module.db().commit()
+        self.assertEqual(self.client.get("/api/entries",headers=headers).status_code,401)
+        replacement=self.device_login(); replacement_headers={"Authorization":f"Bearer {replacement.json['token']}"}
+        with self.module.app.app_context():
+            self.module.db().execute("UPDATE local_users SET session_version=session_version+1 WHERE username='owner'"); self.module.db().commit()
+        self.assertEqual(self.client.get("/api/entries",headers=replacement_headers).status_code,401)
+        with self.module.app.app_context():
+            self.module.db().execute("UPDATE local_users SET session_version=1 WHERE username='owner'"); self.module.db().commit()
+
+    def test_device_login_requires_name_and_obeys_password_checks(self):
+        missing=self.client.post("/auth/device/login",json={"username":"owner","password":"correct horse battery staple"})
+        wrong=self.client.post("/auth/device/login",json={"username":"owner","password":"wrong","deviceName":"Phone"})
+        self.assertEqual(missing.status_code,400)
+        self.assertEqual(wrong.status_code,401)
+
+    def test_native_device_can_list_and_revoke_other_devices(self):
+        first=self.device_login("First phone"); second=self.device_login("Second phone")
+        first_headers={"Authorization":f"Bearer {first.json['token']}"}
+        second_headers={"Authorization":f"Bearer {second.json['token']}"}
+        devices=self.client.get("/auth/devices",headers=first_headers)
+        self.assertEqual(devices.status_code,200)
+        self.assertEqual({item["deviceName"] for item in devices.json},{"First phone","Second phone"})
+        self.assertEqual(sum(item["current"] for item in devices.json),1)
+        revoked=self.client.post("/auth/devices/revoke-others",headers=first_headers)
+        self.assertEqual(revoked.status_code,200)
+        self.assertEqual(revoked.json["revoked"],1)
+        self.assertEqual(self.client.get("/api/entries",headers=second_headers).status_code,401)
+        self.assertEqual(self.client.get("/api/entries",headers=first_headers).status_code,200)
+
+    def test_browser_session_cannot_manage_native_devices(self):
+        self.login()
+        self.assertEqual(self.client.get("/auth/devices").status_code,403)
 
     def test_authenticated_audio_can_be_transcribed(self):
         login = self.login()
@@ -256,11 +321,48 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(feed.status_code,200)
         kinds=[event["kind"] for event in feed.json["events"]]
         self.assertEqual(kinds,["group_created","capture_grouped","capture_standalone"])
+        capture_events=[event for event in feed.json["events"] if event["kind"].startswith("capture_")]
+        self.assertTrue(all(event["details"] for event in capture_events))
+        with self.module.app.app_context():
+            self.assertTrue(all(self.module.db().execute("SELECT 1 FROM entries WHERE id=?",(event["details"],)).fetchone() for event in capture_events))
         messages=" ".join(event["message"] for event in feed.json["events"]).lower()
         self.assertNotIn("confidential",messages)
         self.assertGreater(feed.json["sequence"],initial)
         empty=self.client.get(f"/api/changes?since={feed.json['sequence']}")
         self.assertEqual(empty.json["events"],[])
+
+    def test_authenticated_long_poll_returns_new_capture_immediately(self):
+        login=self.device_login(); bearer={"Authorization":f"Bearer {login.json['token']}"}
+        initial=self.client.get("/api/changes",headers=bearer).json["sequence"]
+        self.client.post("/webhook/index",json={"transcription":"instant notification note"},headers={"X-Webhook-Secret":"test-webhook-secret"})
+        response=self.client.get(f"/api/changes/wait?since={initial}&timeout=1",headers=bearer)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual([event["kind"] for event in response.json["events"]],["capture_standalone"])
+        self.assertGreater(response.json["sequence"],initial)
+
+    def test_long_poll_validates_parameters(self):
+        login=self.device_login(); bearer={"Authorization":f"Bearer {login.json['token']}"}
+        response=self.client.get("/api/changes/wait?since=nope",headers=bearer)
+        self.assertEqual(response.status_code,400)
+
+    def test_authenticated_android_update_manifest_and_download(self):
+        login=self.device_login(); bearer={"Authorization":f"Bearer {login.json['token']}"}
+        previous=(self.module.ANDROID_UPDATE_VERSION_CODE,self.module.ANDROID_UPDATE_VERSION_NAME,self.module.ANDROID_UPDATE_APK)
+        try:
+            release=self.module.DATA_DIR/"test-index-inbox.apk";release.write_bytes(b"signed apk fixture")
+            self.module.ANDROID_UPDATE_VERSION_CODE=19
+            self.module.ANDROID_UPDATE_VERSION_NAME="1.0.0"
+            self.module.ANDROID_UPDATE_APK=release
+            manifest=self.client.get("/api/android-update",headers=bearer)
+            self.assertEqual(manifest.status_code,200)
+            self.assertEqual((manifest.json["versionCode"],manifest.json["versionName"]),(19,"1.0.0"))
+            self.assertEqual(manifest.json["sha256"],self.module.hashlib.sha256(b"signed apk fixture").hexdigest())
+            download=self.client.get("/api/android-update/apk",headers=bearer)
+            self.assertEqual(download.data,b"signed apk fixture")
+            download.close()
+            self.assertEqual(self.client.get("/api/android-update").status_code,401)
+        finally:
+            self.module.ANDROID_UPDATE_VERSION_CODE,self.module.ANDROID_UPDATE_VERSION_NAME,self.module.ANDROID_UPDATE_APK=previous
 
     def test_change_feed_reports_repeated_and_unrecognized_group_commands(self):
         self.login(); initial=self.client.get("/api/changes").json["sequence"]
@@ -281,6 +383,7 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(len(events),1)
         self.assertEqual(events[0]["kind"],"webhook_rejected")
         self.assertNotIn("private",events[0]["message"].lower())
+        self.assertEqual(events[0]["details"],"")
 
     def test_change_feed_reports_ingestion_failure_without_exception_details(self):
         self.login(); initial=self.client.get("/api/changes").json["sequence"]
@@ -292,6 +395,7 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(events[0]["kind"],"ingest_error")
         self.assertNotIn("sensitive",events[0]["message"].lower())
         self.assertNotIn("private",events[0]["message"].lower())
+        self.assertEqual(events[0]["details"],"")
 
     def test_change_feed_rejects_invalid_sequence(self):
         self.login()

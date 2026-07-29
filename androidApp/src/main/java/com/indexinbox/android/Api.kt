@@ -1,0 +1,180 @@
+package com.indexinbox.android
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.MultipartBody
+import okhttp3.RequestBody
+import okhttp3.ResponseBody
+import okhttp3.logging.HttpLoggingInterceptor
+import retrofit2.Response
+import retrofit2.Retrofit
+import retrofit2.converter.kotlinx.serialization.asConverterFactory
+import retrofit2.http.Body
+import retrofit2.http.DELETE
+import retrofit2.http.GET
+import retrofit2.http.Multipart
+import retrofit2.http.Part
+import retrofit2.http.PATCH
+import retrofit2.http.POST
+import retrofit2.http.Path
+import retrofit2.http.Query
+import retrofit2.http.Streaming
+import okhttp3.MediaType.Companion.toMediaType
+
+interface IndexApi {
+    @POST("auth/device/login")
+    suspend fun login(@Body request: DeviceLoginRequest): DeviceLoginResponse
+
+    @POST("auth/device/logout")
+    suspend fun logout(): ApiResult
+
+    @GET("api/entries")
+    suspend fun entries(
+        @Query("page") page: Int = 1,
+        @Query("limit") limit: Int = 100,
+        @Query("q") query: String? = null,
+    ): EntryPage
+
+    @PATCH("api/entries/{id}")
+    suspend fun update(@Path("id") id: String, @Body update: EntryUpdate): ApiResult
+
+    @PATCH("api/entries/{id}")
+    suspend fun assignGroup(@Path("id") id: String, @Body update: JsonObject): ApiResult
+
+    @DELETE("api/entries/{id}")
+    suspend fun delete(@Path("id") id: String): ApiResult
+
+    @POST("api/manual")
+    suspend fun capture(@Body capture: ManualCapture): ApiResult
+
+    @Multipart
+    @POST("api/manual")
+    suspend fun captureAudio(
+        @Part audio: MultipartBody.Part,
+        @Part("transcription") transcription: RequestBody,
+        @Part("title") title: RequestBody,
+        @Part("category") category: RequestBody,
+        @Part("recordedAt") recordedAt: RequestBody,
+    ): ApiResult
+
+    @GET("api/changes")
+    suspend fun changes(@Query("since") since: Long? = null): ChangeFeed
+
+    @GET("api/changes/wait")
+    suspend fun waitForChanges(@Query("since") since: Long, @Query("timeout") timeout: Int = 25): ChangeFeed
+
+    @Multipart
+    @POST("api/transcribe")
+    suspend fun transcribe(@Part audio: MultipartBody.Part): TranscriptionResult
+
+    @GET("api/groups")
+    suspend fun groups(): List<NoteGroup>
+
+    @GET("api/activity")
+    suspend fun activity(): List<ActivityItem>
+
+    @GET("api/groups/{name}/timeline")
+    suspend fun groupTimeline(@Path("name") name: String): GroupTimeline
+
+    @PATCH("api/groups/{name}")
+    suspend fun updateGroup(@Path("name") name: String, @Body update: GroupUpdate): GroupUpdateResult
+
+    @DELETE("api/groups/{name}")
+    suspend fun deleteGroup(@Path("name") name: String, @Query("ungroup") ungroup: Boolean = true): ApiResult
+
+    @GET("api/groups/{name}/aliases")
+    suspend fun groupAliases(@Path("name") name: String): GroupAliases
+
+    @POST("api/groups/{name}/aliases")
+    suspend fun addAlias(@Path("name") name: String, @Body request: AliasRequest): ApiResult
+
+    @retrofit2.http.HTTP(method = "DELETE", path = "api/groups/{name}/aliases", hasBody = true)
+    suspend fun removeAlias(@Path("name") name: String, @Body request: AliasRequest): ApiResult
+
+    @GET("api/group-suggestions")
+    suspend fun suggestions(): List<GroupSuggestion>
+
+    @POST("api/group-suggestions/{id}/{action}")
+    suspend fun resolveSuggestion(@Path("id") id: String, @Path("action") action: String, @Body request: SuggestionRequest): ApiResult
+
+    @POST("api/entries/bulk")
+    suspend fun bulk(@Body request: BulkRequest): ApiResult
+
+    @retrofit2.http.HTTP(method = "DELETE", path = "api/entries", hasBody = true)
+    suspend fun deleteBulk(@Body request: BulkRequest): ApiResult
+
+    @GET("api/status")
+    suspend fun status(): ServerStatus
+
+    @POST("api/backups")
+    suspend fun createBackup(): BackupResult
+
+    @POST("api/maintenance/retention")
+    suspend fun retention(@Body request: RetentionRequest): RetentionResult
+
+    @Streaming
+    @GET("api/export/{format}")
+    suspend fun export(@Path("format") format: String): ResponseBody
+
+    @Streaming
+    @GET("api/groups/{name}/export/{format}")
+    suspend fun groupExport(@Path("name") name: String, @Path("format") format: String): ResponseBody
+
+    @Streaming
+    @GET("api/backups/latest")
+    suspend fun latestBackup(): ResponseBody
+
+    @POST("api/backup-hook")
+    suspend fun triggerBackupHook(): ApiResult
+
+    @Streaming
+    @GET("api/entries/{id}/audio")
+    suspend fun audioDownload(@Path("id") id: String): ResponseBody
+
+    @GET("auth/devices")
+    suspend fun devices(): List<DeviceSession>
+
+    @POST("auth/devices/revoke-others")
+    suspend fun revokeOtherDevices(): RevokeDevicesResult
+
+    @GET("api/android-update")
+    suspend fun androidUpdate(): AndroidUpdate
+
+    @Streaming
+    @GET("api/android-update/apk")
+    suspend fun androidUpdateApk(): ResponseBody
+}
+
+object ApiFactory {
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+
+    fun create(serverUrl: String, token: String? = null): IndexApi {
+        val auth = Interceptor { chain ->
+            val request = chain.request().newBuilder().apply {
+                if (!token.isNullOrBlank()) header("Authorization", "Bearer $token")
+            }.build()
+            chain.proceed(request)
+        }
+        val logging = HttpLoggingInterceptor().apply { level = HttpLoggingInterceptor.Level.BASIC }
+        val client = OkHttpClient.Builder().addInterceptor(auth).addInterceptor(logging).build()
+        return Retrofit.Builder()
+            .baseUrl(AuthStore.normalizeUrl(serverUrl))
+            .client(client)
+            .addConverterFactory(json.asConverterFactory("application/json".toMediaType()))
+            .build()
+            .create(IndexApi::class.java)
+    }
+}
+
+suspend fun fetchAllEntries(api: IndexApi): List<Entry> {
+    val result=mutableListOf<Entry>()
+    var page=1
+    do {
+        val response=api.entries(page=page,limit=200)
+        result+=response.items
+        page++
+    } while(page<=response.pages)
+    return result
+}
