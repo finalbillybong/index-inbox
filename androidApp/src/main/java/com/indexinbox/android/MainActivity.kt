@@ -261,11 +261,13 @@ class IndexViewModel(
         auth.setDarkMode(enabled)
         auth.setThemeMode(if(enabled)"dark" else "light")
         _state.value = _state.value.copy(darkMode = enabled,themeMode=if(enabled)"dark" else "light")
+        CaptureWidgetProvider.updateAll(getApplication())
     }
     fun setThemeMode(mode:String) {
         if(mode !in setOf("system","light","dark")) return
         auth.setThemeMode(mode)
         _state.value=_state.value.copy(themeMode=mode,darkMode=mode=="dark")
+        CaptureWidgetProvider.updateAll(getApplication())
     }
     fun setNotifications(enabled: Boolean) {
         auth.setNotificationsEnabled(enabled)

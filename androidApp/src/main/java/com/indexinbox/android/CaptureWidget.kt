@@ -11,6 +11,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.media.MediaRecorder
 import android.os.Build
@@ -64,6 +65,11 @@ internal object CaptureWidgetState {
 }
 
 class CaptureWidgetProvider : AppWidgetProvider() {
+    override fun onReceive(context: Context, intent: Intent) {
+        super.onReceive(context, intent)
+        if (intent.action == Intent.ACTION_CONFIGURATION_CHANGED) updateAll(context)
+    }
+
     override fun onUpdate(context: Context, manager: AppWidgetManager, ids: IntArray) {
         ids.forEach { manager.updateAppWidget(it, views(context)) }
     }
@@ -78,6 +84,7 @@ class CaptureWidgetProvider : AppWidgetProvider() {
         private fun views(context: Context): RemoteViews {
             val auth = AuthStore(context)
             val status = CaptureWidgetState.status(context)
+            val dark = widgetUsesDarkTheme(auth.themeMode, context.resources.configuration.uiMode)
             val hasMic = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
                 PackageManager.PERMISSION_GRANTED
             val ready = auth.token != null && hasMic
@@ -109,13 +116,34 @@ class CaptureWidgetProvider : AppWidgetProvider() {
                 PendingIntent.getForegroundService(context, 302, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
             }
             return RemoteViews(context.packageName, R.layout.capture_widget).apply {
+                setInt(
+                    R.id.widget_root,
+                    "setBackgroundResource",
+                    if (dark) R.drawable.widget_background_dark else R.drawable.widget_background,
+                )
                 setTextViewText(R.id.widget_title, title)
                 setTextViewText(R.id.widget_status, detail)
-                setInt(R.id.widget_icon, "setColorFilter", if (status == "recording") Color.rgb(190, 42, 42) else Color.rgb(49, 92, 73))
+                setTextColor(R.id.widget_title, if (dark) Color.rgb(247, 245, 239) else Color.rgb(23, 25, 30))
+                setTextColor(R.id.widget_status, if (dark) Color.rgb(185, 180, 170) else Color.rgb(91, 93, 99))
+                setInt(
+                    R.id.widget_icon,
+                    "setColorFilter",
+                    when {
+                        status == "recording" -> Color.rgb(224, 84, 76)
+                        dark -> Color.rgb(255, 202, 72)
+                        else -> Color.rgb(49, 92, 73)
+                    },
+                )
                 setOnClickPendingIntent(R.id.widget_root, pendingIntent)
             }
         }
     }
+}
+
+internal fun widgetUsesDarkTheme(themeMode: String, uiMode: Int): Boolean = when (themeMode) {
+    "dark" -> true
+    "light" -> false
+    else -> uiMode and Configuration.UI_MODE_NIGHT_MASK == Configuration.UI_MODE_NIGHT_YES
 }
 
 class AudioCaptureService : Service() {
