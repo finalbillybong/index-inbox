@@ -59,7 +59,7 @@ test.describe.serial('Index Inbox browser flows', () => {
     await page.getByRole('button', { name: 'Review suggestions (1)' }).click();
     await expect(page.locator('.suggestion-row')).toContainText('Suggested: BROWSER42');
     await page.locator('.suggestion-row').getByRole('button', { name: 'Accept' }).click();
-    await expect(page.getByText('BROWSER42', { exact: false })).toBeVisible();
+    await expect(page.locator('.group-row').filter({ hasText: 'BROWSER42' })).toBeVisible();
 
     const row = page.locator('.group-row').filter({ hasText: 'BROWSER42' });
     await row.getByRole('button', { name: 'Rename' }).click();
