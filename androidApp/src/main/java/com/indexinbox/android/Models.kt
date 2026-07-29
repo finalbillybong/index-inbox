@@ -59,6 +59,7 @@ data class ManualCapture(
     val title: String = "",
     val category: String = "note",
     val recordedAt: Long = System.currentTimeMillis(),
+    val id: String? = null,
 )
 
 @Serializable

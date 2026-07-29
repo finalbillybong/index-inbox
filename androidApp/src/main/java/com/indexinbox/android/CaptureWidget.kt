@@ -32,6 +32,7 @@ import androidx.work.WorkerParameters
 import retrofit2.HttpException
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.TimeUnit
 
@@ -305,8 +306,9 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
             audioPath = file.absolutePath,
             createdAt = System.currentTimeMillis(),
         )
+        val api=ApiFactory.create(server, token)
         return try {
-            uploadPendingCapture(ApiFactory.create(server, token), capture)
+            uploadPendingCapture(api, capture)
             file.delete()
             runCatching {
                 IndexDatabase.get(applicationContext).entries().replaceAll(fetchAllEntries(ApiFactory.create(server, token)))
@@ -315,9 +317,19 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
             Result.success()
         } catch (error: Exception) {
             if (error is IOException || error is HttpException && error.code() >= 500) {
-                IndexDatabase.get(applicationContext).pending().upsert(capture.copy(lastError = error.message ?: "Offline"))
-                PendingCaptureWorker.schedule(applicationContext)
-                CaptureWidgetState.set(applicationContext, "queued")
+                val acknowledged=runCatching {
+                    val entries=fetchAllEntries(api)
+                    IndexDatabase.get(applicationContext).entries().replaceAll(entries)
+                    entries.any { it.sourceKey==manualCaptureSourceKey(capture.id) }
+                }.getOrDefault(false)
+                if(acknowledged) {
+                    file.delete()
+                    CaptureWidgetState.set(applicationContext,"saved")
+                } else {
+                    IndexDatabase.get(applicationContext).pending().upsert(capture.copy(lastError = error.message ?: "Offline"))
+                    PendingCaptureWorker.schedule(applicationContext)
+                    CaptureWidgetState.set(applicationContext, "queued")
+                }
                 Result.success()
             } else {
                 CaptureWidgetState.set(applicationContext, "error", error.message ?: "Upload failed", file.absolutePath)
@@ -337,3 +349,8 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
         }
     }
 }
+
+internal fun manualCaptureSourceKey(captureId:String):String =
+    MessageDigest.getInstance("SHA-256")
+        .digest("manual:$captureId".toByteArray())
+        .joinToString(""){"%02x".format(it)}

@@ -157,6 +157,7 @@ The widget uses the same **Light**, **Dark**, or **Follow OS** appearance select
 Its default capture category can be set to **Note**, **Task**, **Idea**, or **Question** in the same settings section.
 
 Android new-note notifications include the saved note content when available and provide **Archive**, **Star**, **Processed**, and **Delete** quick actions. APK updates show live download progress before Android opens the installer.
+Native captures carry a stable idempotency key, so reconnecting after an ambiguous upload response cannot create a second note from the same recording.
 
 ## Local authentication setup
 

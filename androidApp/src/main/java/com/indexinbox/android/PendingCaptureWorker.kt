@@ -26,8 +26,10 @@ class PendingCaptureWorker(context: Context,params: WorkerParameters):CoroutineW
         return try {
             for(capture in database.pending().all()) {
                 uploadPendingCapture(api,capture)
+                val widgetCapture=capture.audioPath?.let(::File)?.parentFile?.name=="widget-audio"
                 capture.audioPath?.let { File(it).delete() }
                 database.pending().delete(capture.id)
+                if(widgetCapture)CaptureWidgetState.set(applicationContext,"saved")
             }
             database.entries().replaceAll(fetchAllEntries(api))
             Result.success()
@@ -52,7 +54,7 @@ class PendingCaptureWorker(context: Context,params: WorkerParameters):CoroutineW
 suspend fun uploadPendingCapture(api: IndexApi,capture: PendingCapture) {
     val audio=capture.audioPath?.let(::File)?.takeIf(File::exists)
     if(audio==null) {
-        api.capture(ManualCapture(capture.transcription,capture.title,capture.category,capture.createdAt))
+        api.capture(ManualCapture(capture.transcription,capture.title,capture.category,capture.createdAt,capture.id))
         return
     }
     val plain="text/plain".toMediaType()
@@ -62,5 +64,6 @@ suspend fun uploadPendingCapture(api: IndexApi,capture: PendingCapture) {
         capture.title.toRequestBody(plain),
         capture.category.toRequestBody(plain),
         capture.createdAt.toString().toRequestBody(plain),
+        capture.id.toRequestBody(plain),
     )
 }

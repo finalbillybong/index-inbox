@@ -108,6 +108,36 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(logout.status_code,200)
         self.assertEqual(self.client.get("/api/entries",headers=headers).status_code,401)
 
+    def test_manual_audio_retry_with_same_id_is_idempotent(self):
+        login=self.device_login(); headers={"Authorization":f"Bearer {login.json['token']}"}
+        capture_id="android-retry-idempotency-test"
+        with patch.object(self.module,"transcribe_upload",side_effect=[
+            {"transcription":"first transcription"},
+            {"transcription":"slightly different second transcription"},
+        ]) as transcribe:
+            first=self.client.post("/api/manual",data={
+                "id":capture_id,
+                "recordedAt":"1785355200000",
+                "category":"note",
+                "audio":(io.BytesIO(b"first audio payload"),"recording.m4a"),
+            },headers=headers)
+            retry=self.client.post("/api/manual",data={
+                "id":capture_id,
+                "recordedAt":"1785355200000",
+                "category":"note",
+                "audio":(io.BytesIO(b"first audio payload"),"recording.m4a"),
+            },headers=headers)
+        self.assertEqual(transcribe.call_count,1)
+        self.assertEqual(first.status_code,201)
+        self.assertEqual(retry.status_code,200)
+        self.assertTrue(retry.json["duplicate"])
+        self.assertEqual(retry.json["id"],first.json["id"])
+        with self.module.app.app_context():
+            rows=self.module.db().execute(
+                "SELECT transcription FROM entries WHERE id=?",(first.json["id"],),
+            ).fetchall()
+        self.assertEqual([row["transcription"] for row in rows],["first transcription"])
+
     def test_device_token_is_hashed_and_wrong_token_is_rejected(self):
         login=self.device_login()
         with self.module.app.app_context():

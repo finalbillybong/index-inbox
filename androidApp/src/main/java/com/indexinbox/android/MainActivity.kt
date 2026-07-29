@@ -627,15 +627,16 @@ class IndexViewModel(
         if (text.isBlank()) return
         val server = auth.serverUrl ?: return
         val token = auth.token ?: return
+        val captureId=UUID.randomUUID().toString()
         viewModelScope.launch {
             _state.value=_state.value.copy(loading=true,error=null)
             try {
-                ApiFactory.create(server, token).capture(ManualCapture(text.trim(), title.trim(),category))
+                ApiFactory.create(server, token).capture(ManualCapture(text.trim(), title.trim(),category,id=captureId))
                 showCapture(false)
                 refresh()
             } catch(error:Exception) {
                 if(shouldQueue(error)) {
-                    queueCapture(title,text,category,null,error)
+                    queueCapture(title,text,category,null,error,captureId)
                     showCapture(false)
                 } else _state.value=_state.value.copy(error=error.message?:"Capture failed")
             } finally {
@@ -647,6 +648,7 @@ class IndexViewModel(
     fun captureAudio(file: File, text: String, title: String = "", category: String = "note") {
         val server = auth.serverUrl ?: return
         val token = auth.token ?: return
+        val captureId=UUID.randomUUID().toString()
         viewModelScope.launch {
             _state.value=_state.value.copy(loading=true,error=null)
             try {
@@ -659,6 +661,7 @@ class IndexViewModel(
                     title.trim().toRequestBody(plain),
                     category.toRequestBody(plain),
                     System.currentTimeMillis().toString().toRequestBody(plain),
+                    captureId.toRequestBody(plain),
                 )
                 file.delete()
                 showCapture(false)
@@ -668,7 +671,7 @@ class IndexViewModel(
                     val directory=File(getApplication<Application>().filesDir,"pending-audio").apply{mkdirs()}
                     val durable=File(directory,"${UUID.randomUUID()}.m4a")
                     file.copyTo(durable,overwrite=true)
-                    queueCapture(title,text,category,durable.absolutePath,error)
+                    queueCapture(title,text,category,durable.absolutePath,error,captureId)
                     showCapture(false)
                 } else _state.value=_state.value.copy(error=error.message?:"Capture failed")
             } finally {
@@ -679,8 +682,8 @@ class IndexViewModel(
 
     private fun shouldQueue(error: Exception)=error is IOException||(error is HttpException&&error.code()>=500)
 
-    private suspend fun queueCapture(title:String,text:String,category:String,audioPath:String?,error:Exception) {
-        pendingDao.upsert(PendingCapture(UUID.randomUUID().toString(),title.trim(),text.trim(),category,audioPath,System.currentTimeMillis(),error.message?:"Offline"))
+    private suspend fun queueCapture(title:String,text:String,category:String,audioPath:String?,error:Exception,captureId:String=UUID.randomUUID().toString()) {
+        pendingDao.upsert(PendingCapture(captureId,title.trim(),text.trim(),category,audioPath,System.currentTimeMillis(),error.message?:"Offline"))
         PendingCaptureWorker.schedule(getApplication())
         _state.value=_state.value.copy(error="Saved to pending captures; it will retry automatically")
     }
