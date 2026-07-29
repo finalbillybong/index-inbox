@@ -65,14 +65,19 @@ Existing installations continue to use Firebase when `AUTH_PROVIDER` is omitted.
 
 The published image includes the web application, API and matching signed Android APK. A new server needs Docker Compose, an HTTPS origin and a persistent data directory; it does not need Git, Python, Java or the Android SDK.
 
-Run the setup helper with the public HTTPS origin and absolute data path:
+Create an empty installation directory and enter it first. The setup helper writes
+`compose.yaml` and `.env` into the current directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/finalbillybong/index-inbox/main/setup.sh \
-  | bash -s -- https://index.example.com /absolute/path/to/index-inbox/data
+mkdir -p /absolute/path/to/index-inbox
+cd /absolute/path/to/index-inbox
+curl -fsSL https://raw.githubusercontent.com/finalbillybong/index-inbox/main/setup.sh | bash -s -- https://index.example.com /absolute/path/to/index-inbox/data
 ```
 
-The helper downloads `compose.yaml`, generates independent webhook and setup secrets, creates `.env`, pulls the latest GHCR image and starts the service. It prints the one-time setup token.
+Replace the example hostname and both occurrences of the installation path. The
+helper downloads `compose.yaml`, generates independent webhook and setup secrets,
+creates `.env`, creates the persistent `data` directory, pulls the latest GHCR
+image and starts the service. It prints the one-time setup token.
 
 Open the HTTPS origin and create the first owner using that token, a username and a password of at least 12 characters. Then remove the `LOCAL_SETUP_TOKEN` line from `.env` and recreate the container:
 
