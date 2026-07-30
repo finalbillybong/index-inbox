@@ -23,19 +23,22 @@ class PendingCaptureWorker(context: Context,params: WorkerParameters):CoroutineW
         val token=auth.token?:return Result.success()
         val database=IndexDatabase.get(applicationContext)
         val api=ApiFactory.create(server,token)
-        return try {
-            for(capture in database.pending().all()) {
+        var failed=false
+        for(capture in database.pending().all()) {
+            try {
                 uploadPendingCapture(api,capture)
                 val widgetCapture=capture.audioPath?.let(::File)?.parentFile?.name=="widget-audio"
                 capture.audioPath?.let { File(it).delete() }
                 database.pending().delete(capture.id)
                 if(widgetCapture)CaptureWidgetState.set(applicationContext,"saved")
+            } catch(error:Exception) {
+                failed=true
+                database.pending().upsert(capture.copy(lastError=error.message?:"Upload failed"))
             }
-            database.entries().replaceAll(fetchAllEntries(api))
-            Result.success()
-        } catch (_:Exception) {
-            Result.retry()
         }
+        runCatching{database.entries().replaceAll(fetchAllEntries(api))}
+            .onFailure{failed=true}
+        return if(failed)Result.retry() else Result.success()
     }
 
     companion object {

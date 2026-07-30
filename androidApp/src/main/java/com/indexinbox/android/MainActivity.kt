@@ -50,7 +50,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.Star
+import androidx.compose.material.icons.outlined.StarBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -597,6 +597,20 @@ class IndexViewModel(
         }
     }
 
+    fun toggleStar(entry:Entry) {
+        val server=auth.serverUrl?:return
+        val token=auth.token?:return
+        viewModelScope.launch {
+            busy {
+                val api=ApiFactory.create(server,token)
+                api.update(entry.id,EntryUpdate(starred=entry.starred==0))
+                val entries=fetchAllEntries(api)
+                dao.replaceAll(entries)
+                if(_state.value.selected?.id==entry.id)select(entries.firstOrNull{it.id==entry.id})
+            }
+        }
+    }
+
     fun assignGroup(entry: Entry, group: String?) {
         val server=auth.serverUrl?:return; val token=auth.token?:return
         viewModelScope.launch { busy {
@@ -700,6 +714,30 @@ class IndexViewModel(
     }
 
     fun retryPending() { PendingCaptureWorker.schedule(getApplication()) }
+
+    fun retryPending(capture:PendingCapture) {
+        val server=auth.serverUrl?:return
+        val token=auth.token?:return
+        viewModelScope.launch {
+            _state.value=_state.value.copy(loading=true,error=null)
+            try {
+                val api=ApiFactory.create(server,token)
+                uploadPendingCapture(api,capture)
+                capture.audioPath?.let{File(it).delete()}
+                pendingDao.delete(capture.id)
+                dao.replaceAll(fetchAllEntries(api))
+                if(capture.audioPath?.let(::File)?.parentFile?.name=="widget-audio") {
+                    CaptureWidgetState.set(getApplication(),"saved")
+                }
+            } catch(error:Exception) {
+                val message=error.message?:"Upload failed"
+                pendingDao.upsert(capture.copy(lastError=message))
+                _state.value=_state.value.copy(error="Capture is still queued: $message")
+            } finally {
+                _state.value=_state.value.copy(loading=false)
+            }
+        }
+    }
 
     fun transcribeAudio(file: File, onResult: (Result<String>) -> Unit) {
         val server = auth.serverUrl ?: return
@@ -958,6 +996,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onSave=viewModel::updatePending,
             onDiscard=viewModel::discardPending,
             onRetry=viewModel::retryPending,
+            onRetryCapture=viewModel::retryPending,
         )
         state.captureOpen -> CaptureScreen(
             initial = SharedCapture.text,
@@ -986,6 +1025,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             loading = state.loading,
             onBack = { viewModel.select(null) },
             onSave = { viewModel.update(state.selected!!, it) },
+            onStar = { viewModel.toggleStar(state.selected!!) },
             onDelete = { viewModel.delete(state.selected!!) },
             onAssignGroup = { viewModel.assignGroup(state.selected!!,it) },
             onDownloadAudio = { uri -> viewModel.downloadAudio(state.selected!!,uri) },
@@ -1017,7 +1057,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             syncStatus=state.syncStatus,
             onPending={viewModel.showScreen("pending")},
             onBulk = viewModel::bulk,
-            onStar = { entry -> viewModel.update(entry, EntryUpdate(starred = entry.starred == 0)) },
+            onStar = viewModel::toggleStar,
         )
     }
 }
@@ -1253,16 +1293,7 @@ private fun InboxScreen(
                                 Text(formatDate(entry.createdAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             IconButton(onClick = { onStar(entry) }) {
-                                val starred=entry.starred==1
-                                Icon(
-                                    imageVector=if(starred)Icons.Default.Star else Icons.Outlined.Star,
-                                    contentDescription=if(starred)"Unstar note" else "Star note",
-                                    tint=if(starred) {
-                                        androidx.compose.ui.graphics.Color(0xFFFFCA28)
-                                    } else {
-                                        androidx.compose.ui.graphics.Color.White
-                                    },
-                                )
+                                StarStateIcon(entry.starred==1)
                             }
                         }
                         HorizontalDivider()
@@ -1281,6 +1312,7 @@ private fun EntryScreen(
     loading: Boolean,
     onBack: () -> Unit,
     onSave: (EntryUpdate) -> Unit,
+    onStar: () -> Unit,
     onDelete: () -> Unit,
     onAssignGroup: (String?) -> Unit,
     onDownloadAudio: (Uri) -> Unit,
@@ -1315,6 +1347,7 @@ private fun EntryScreen(
             title = { Text("Edit entry") },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             actions = {
+                IconButton(onClick=onStar,enabled=!loading){StarStateIcon(entry.starred==1)}
                 IconButton(onClick = { onSave(EntryUpdate(title = title, transcription = text, tags = tags)) }, enabled = !loading) { Icon(Icons.Default.Check, "Save") }
             },
         )
@@ -1855,6 +1888,7 @@ private fun PendingCapturesScreen(
     onSave: (PendingCapture,String,String,String) -> Unit,
     onDiscard: (PendingCapture) -> Unit,
     onRetry: () -> Unit,
+    onRetryCapture: (PendingCapture) -> Unit,
 ) {
     Scaffold(topBar={
         TopAppBar(
@@ -1867,7 +1901,7 @@ private fun PendingCapturesScreen(
             Text(if(loading)"Retrying…" else "No captures are waiting to upload.")
         } else LazyColumn(Modifier.padding(padding)) {
             items(captures,key={it.id}) { capture ->
-                PendingCaptureCard(capture,onSave,onDiscard)
+                PendingCaptureCard(capture,loading,onSave,onDiscard,onRetryCapture)
                 HorizontalDivider()
             }
         }
@@ -1877,8 +1911,10 @@ private fun PendingCapturesScreen(
 @Composable
 private fun PendingCaptureCard(
     capture: PendingCapture,
+    loading:Boolean,
     onSave: (PendingCapture,String,String,String) -> Unit,
     onDiscard: (PendingCapture) -> Unit,
+    onRetry: (PendingCapture) -> Unit,
 ) {
     var title by remember(capture.id,capture.title){mutableStateOf(capture.title)}
     var text by remember(capture.id,capture.transcription){mutableStateOf(capture.transcription)}
@@ -1892,7 +1928,7 @@ private fun PendingCaptureCard(
         dismissButton={TextButton(onClick={confirmDiscard=false}){Text("Cancel")}},
     )
     Column(Modifier.fillMaxWidth().padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-        Text(formatDate(java.time.Instant.ofEpochMilli(capture.createdAt).toString()),style=MaterialTheme.typography.labelSmall)
+        Text("Queued ${formatDate(java.time.Instant.ofEpochMilli(capture.createdAt).toString())}",style=MaterialTheme.typography.labelSmall)
         if(capture.audioPath!=null)Text("Audio attached",color=MaterialTheme.colorScheme.primary,fontWeight=FontWeight.Bold)
         OutlinedTextField(title,{title=it},label={Text("Title")},modifier=Modifier.fillMaxWidth())
         OutlinedTextField(text,{text=it},label={Text("Transcription")},modifier=Modifier.fillMaxWidth(),minLines=3)
@@ -1901,12 +1937,26 @@ private fun PendingCaptureCard(
                 FilterChip(selected=category==value,onClick={category=value},label={Text(value)})
             }
         }
-        if(capture.lastError.isNotBlank())Text(capture.lastError,style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.error)
+        Text(
+            if(capture.lastError.isBlank())"Waiting to upload automatically" else "Last attempt failed: ${capture.lastError}",
+            style=MaterialTheme.typography.labelSmall,
+            color=if(capture.lastError.isBlank())MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error,
+        )
         Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
             Button(onClick={onSave(capture,title,text,category)}){Text("Save edits")}
+            OutlinedButton(onClick={onRetry(capture)},enabled=!loading){Text("Retry now")}
             OutlinedButton(onClick={confirmDiscard=true}){Text("Discard")}
         }
     }
+}
+
+@Composable
+private fun StarStateIcon(starred:Boolean) {
+    Icon(
+        imageVector=if(starred)Icons.Default.Star else Icons.Outlined.StarBorder,
+        contentDescription=if(starred)"Unstar note" else "Star note",
+        tint=if(starred)androidx.compose.ui.graphics.Color(0xFFFFCA28) else androidx.compose.ui.graphics.Color.White,
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
