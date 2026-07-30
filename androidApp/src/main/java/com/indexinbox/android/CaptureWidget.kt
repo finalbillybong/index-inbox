@@ -195,7 +195,7 @@ class AudioCaptureService : Service() {
             active = this
             startedElapsed = SystemClock.elapsedRealtime()
             CaptureWidgetState.set(this, "recording", file = file.absolutePath)
-            handler.postDelayed(maximumDuration,TimeUnit.MINUTES.toMillis(auth.widgetRecordingMinutes.toLong()))
+            handler.postDelayed(maximumDuration,TimeUnit.SECONDS.toMillis(auth.widgetRecordingSeconds.toLong()))
         } catch (error: Exception) {
             file.delete()
             recorder?.release()

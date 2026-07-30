@@ -261,7 +261,7 @@ Authenticated downloads stream through the native Android document picker, keepi
 
 Native settings can disable all activity notifications or independently stop the permanent self-hosted instant connection while retaining periodic fallback sync. The current native device can inspect privacy-safe session metadata and revoke every other device token. Entry details can display the formatted original webhook payload for diagnostics.
 
-Notification settings also control note previews, sound, vibration, and configurable quiet hours. Quiet-hour notifications are delivered silently rather than discarded. The home-screen audio widget supports configurable 1, 3, 5, 10, or 15 minute recording limits.
+Notification settings also control note previews, sound, vibration, and configurable quiet hours. Quiet-hour notifications are delivered silently rather than discarded. The home-screen audio widget supports configurable 1, 3, 5, 10, or 15 second recording limits.
 
 The native parity audit covers inbox search and state/category/group filters, group and alias administration, activity, exports, verified backups, audio retention, and device-session management. Server-only command-line recovery and deployment controls intentionally remain outside the Android client.
 

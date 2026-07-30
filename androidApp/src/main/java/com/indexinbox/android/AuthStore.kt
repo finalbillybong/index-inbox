@@ -28,7 +28,7 @@ class AuthStore(context: Context) {
     val quietHoursEnd: Int get() = prefs.getInt("quiet_hours_end", 7).coerceIn(0,23)
     val widgetCaptureMode: String get() = prefs.getString("widget_capture_mode", "instant") ?: "instant"
     val widgetCaptureCategory: String get() = prefs.getString("widget_capture_category", "note") ?: "note"
-    val widgetRecordingMinutes: Int get() = prefs.getInt("widget_recording_minutes", 5).coerceIn(1,15)
+    val widgetRecordingSeconds: Int get() = prefs.getInt("widget_recording_seconds", 15).coerceIn(1,15)
 
     fun save(serverUrl: String, token: String) {
         prefs.edit().putString("server_url", normalizeUrl(serverUrl)).putString("token", token).apply()
@@ -48,7 +48,7 @@ class AuthStore(context: Context) {
         .apply()
     fun setWidgetCaptureMode(mode: String) = prefs.edit().putString("widget_capture_mode", mode).apply()
     fun setWidgetCaptureCategory(category: String) = prefs.edit().putString("widget_capture_category", category).apply()
-    fun setWidgetRecordingMinutes(minutes:Int) = prefs.edit().putInt("widget_recording_minutes",minutes.coerceIn(1,15)).apply()
+    fun setWidgetRecordingSeconds(seconds:Int) = prefs.edit().putInt("widget_recording_seconds",seconds.coerceIn(1,15)).apply()
 
     fun clear() = prefs.edit().remove("server_url").remove("token").apply()
 

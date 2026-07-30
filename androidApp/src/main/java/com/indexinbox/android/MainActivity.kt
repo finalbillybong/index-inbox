@@ -152,7 +152,7 @@ data class AppState(
     val quietHoursEnd:Int = 7,
     val widgetCaptureMode: String = "instant",
     val widgetCaptureCategory: String = "note",
-    val widgetRecordingMinutes:Int = 5,
+    val widgetRecordingSeconds:Int = 15,
     val syncStatus: String = "Saved notes available offline",
 )
 
@@ -172,7 +172,7 @@ class IndexViewModel(
         notificationVibration=auth.notificationVibration,quietHoursEnabled=auth.quietHoursEnabled,
         quietHoursStart=auth.quietHoursStart,quietHoursEnd=auth.quietHoursEnd,
         widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory,
-        widgetRecordingMinutes=auth.widgetRecordingMinutes,
+        widgetRecordingSeconds=auth.widgetRecordingSeconds,
     ))
     val state: StateFlow<AppState> = _state
     private val _groups = MutableStateFlow<List<NoteGroup>>(emptyList())
@@ -329,10 +329,10 @@ class IndexViewModel(
         _state.value = _state.value.copy(widgetCaptureCategory = category)
         CaptureWidgetProvider.updateAll(getApplication())
     }
-    fun setWidgetRecordingMinutes(minutes:Int) {
-        val value=minutes.coerceIn(1,15)
-        auth.setWidgetRecordingMinutes(value)
-        _state.value=_state.value.copy(widgetRecordingMinutes=value)
+    fun setWidgetRecordingSeconds(seconds:Int) {
+        val value=seconds.coerceIn(1,15)
+        auth.setWidgetRecordingSeconds(value)
+        _state.value=_state.value.copy(widgetRecordingSeconds=value)
     }
     fun setFilter(filter: String) { _state.value = _state.value.copy(inboxFilter = filter) }
     fun setCategoryFilter(category: String) { _state.value = _state.value.copy(categoryFilter = category) }
@@ -1017,7 +1017,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             quietHoursEnd=state.quietHoursEnd,
             widgetCaptureMode=state.widgetCaptureMode,
             widgetCaptureCategory=state.widgetCaptureCategory,
-            widgetRecordingMinutes=state.widgetRecordingMinutes,
+            widgetRecordingSeconds=state.widgetRecordingSeconds,
             onBack={viewModel.showScreen("inbox")},
             onBackup=viewModel::createBackup,
             onRetention=viewModel::runRetention,
@@ -1032,7 +1032,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onQuietHours=viewModel::setQuietHours,
             onWidgetCaptureMode=viewModel::setWidgetCaptureMode,
             onWidgetCaptureCategory=viewModel::setWidgetCaptureCategory,
-            onWidgetRecordingMinutes=viewModel::setWidgetRecordingMinutes,
+            onWidgetRecordingSeconds=viewModel::setWidgetRecordingSeconds,
             onRevokeOthers=viewModel::revokeOtherDevices,
             onCheckUpdate=viewModel::checkForUpdate,
             onInstallUpdate=viewModel::installUpdate,
@@ -1723,7 +1723,7 @@ private fun StatusScreen(
     quietHoursEnd:Int,
     widgetCaptureMode: String,
     widgetCaptureCategory: String,
-    widgetRecordingMinutes:Int,
+    widgetRecordingSeconds:Int,
     onBack: () -> Unit,
     onBackup: () -> Unit,
     onRetention: (Int) -> Unit,
@@ -1738,7 +1738,7 @@ private fun StatusScreen(
     onQuietHours:(Boolean,Int,Int)->Unit,
     onWidgetCaptureMode: (String) -> Unit,
     onWidgetCaptureCategory: (String) -> Unit,
-    onWidgetRecordingMinutes:(Int)->Unit,
+    onWidgetRecordingSeconds:(Int)->Unit,
     onRevokeOthers: () -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -1929,11 +1929,11 @@ private fun StatusScreen(
             }
             Text("Maximum recording length",fontWeight=FontWeight.Bold)
             Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                listOf(1,3,5,10,15).forEach { minutes ->
+                listOf(1,3,5,10,15).forEach { seconds ->
                     FilterChip(
-                        selected=widgetRecordingMinutes==minutes,
-                        onClick={onWidgetRecordingMinutes(minutes)},
-                        label={Text("$minutes min")},
+                        selected=widgetRecordingSeconds==seconds,
+                        onClick={onWidgetRecordingSeconds(seconds)},
+                        label={Text("$seconds sec")},
                     )
                 }
             }
