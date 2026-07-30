@@ -30,6 +30,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
 import java.io.IOException
+import java.time.ZonedDateTime
 
 class InstantSyncService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -104,16 +105,22 @@ class InstantSyncService : Service() {
 
 object NotificationCenter {
     private const val CONNECTION_CHANNEL = "index_inbox_connection"
-    private const val ACTIVITY_CHANNEL = "index_inbox_activity"
 
     fun ensureChannels(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(CONNECTION_CHANNEL, "Instant connection", NotificationManager.IMPORTANCE_LOW),
         )
-        manager.createNotificationChannel(
-            NotificationChannel(ACTIVITY_CHANNEL, "Inbox activity", NotificationManager.IMPORTANCE_DEFAULT),
-        )
+        listOf(true to true,true to false,false to true,false to false).forEach { (sound,vibration) ->
+            val channel=NotificationChannel(
+                notificationChannelId(sound,vibration),
+                "Inbox activity${if(sound||vibration)" (${listOfNotNull(if(sound)"sound" else null,if(vibration)"vibration" else null).joinToString(" + ")})" else " (silent)"}",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            )
+            channel.enableVibration(vibration)
+            if(!sound)channel.setSound(null,null)
+            manager.createNotificationChannel(channel)
+        }
     }
 
     fun connectionNotification(context: Context) = NotificationCompat.Builder(context, CONNECTION_CHANNEL)
@@ -131,6 +138,8 @@ object NotificationCenter {
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
         ensureChannels(context)
+        val auth=AuthStore(context)
+        val quiet=auth.quietHoursEnabled&&isQuietHour(ZonedDateTime.now().hour,auth.quietHoursStart,auth.quietHoursEnd)
         val title = when (event.kind) {
             "capture_standalone" -> "Note received"
             "capture_grouped" -> "Grouped note received"
@@ -142,15 +151,17 @@ object NotificationCenter {
             event.kind in setOf("capture_standalone","capture_grouped","group_unrecognized")
         }
         val entry=entryId?.let { IndexDatabase.get(context).entries().get(it) }
-        val body=notificationBody(entry,event.message)
+        val body=if(auth.notificationPreview)notificationBody(entry,event.message) else "Open Index Inbox to view this update"
         val notificationId=1_000 + event.id.toInt()
-        val builder=NotificationCompat.Builder(context, ACTIVITY_CHANNEL)
+        val sound=auth.notificationSound&&!quiet
+        val vibration=auth.notificationVibration&&!quiet
+        val builder=NotificationCompat.Builder(context,notificationChannelId(sound,vibration))
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(0xFFFFCA48.toInt())
             .setContentTitle(entry?.title?.takeIf{it.isNotBlank()} ?: title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setVisibility(if(auth.notificationPreview)NotificationCompat.VISIBILITY_PRIVATE else NotificationCompat.VISIBILITY_SECRET)
             .setAutoCancel(true)
             .setContentIntent(launchIntent(context,if(entryId!=null)"entry" else "activity",entryId))
         if(entryId!=null&&entry!=null) {
@@ -193,6 +204,15 @@ object NotificationCenter {
     const val ACTION_DELETE="com.indexinbox.android.notification.DELETE"
     const val EXTRA_ENTRY_ID="entry_id"
     const val EXTRA_NOTIFICATION_ID="notification_id"
+}
+
+internal fun notificationChannelId(sound:Boolean,vibration:Boolean)=
+    "index_inbox_activity_${if(sound)"sound" else "silent"}_${if(vibration)"vibrate" else "still"}"
+
+internal fun isQuietHour(hour:Int,start:Int,end:Int)=when {
+    start==end -> true
+    start<end -> hour in start until end
+    else -> hour>=start||hour<end
 }
 
 class NotificationActionReceiver:BroadcastReceiver() {

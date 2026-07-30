@@ -85,6 +85,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.painterResource
@@ -143,8 +144,15 @@ data class AppState(
     val groupFilter: String = "",
     val notificationsEnabled: Boolean = true,
     val instantNotifications: Boolean = true,
+    val notificationPreview:Boolean = true,
+    val notificationSound:Boolean = true,
+    val notificationVibration:Boolean = true,
+    val quietHoursEnabled:Boolean = false,
+    val quietHoursStart:Int = 22,
+    val quietHoursEnd:Int = 7,
     val widgetCaptureMode: String = "instant",
     val widgetCaptureCategory: String = "note",
+    val widgetRecordingMinutes:Int = 5,
     val syncStatus: String = "Saved notes available offline",
 )
 
@@ -157,7 +165,15 @@ class IndexViewModel(
     val entries = dao.observeInbox().catch { emit(emptyList()) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val pendingCaptures=pendingDao.observeAll().stateIn(viewModelScope,SharingStarted.WhileSubscribed(5_000),emptyList())
-    private val _state = MutableStateFlow(AppState(authenticated=auth.token!=null,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory))
+    private val _state = MutableStateFlow(AppState(
+        authenticated=auth.token!=null,darkMode=auth.darkMode,themeMode=auth.themeMode,
+        notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,
+        notificationPreview=auth.notificationPreview,notificationSound=auth.notificationSound,
+        notificationVibration=auth.notificationVibration,quietHoursEnabled=auth.quietHoursEnabled,
+        quietHoursStart=auth.quietHoursStart,quietHoursEnd=auth.quietHoursEnd,
+        widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory,
+        widgetRecordingMinutes=auth.widgetRecordingMinutes,
+    ))
     val state: StateFlow<AppState> = _state
     private val _groups = MutableStateFlow<List<NoteGroup>>(emptyList())
     val groups: StateFlow<List<NoteGroup>> = _groups
@@ -283,6 +299,24 @@ class IndexViewModel(
         _state.value=_state.value.copy(instantNotifications=enabled)
         if(enabled&&_state.value.notificationsEnabled)InstantSyncService.start(getApplication()) else InstantSyncService.stop(getApplication())
     }
+    fun setNotificationPreview(enabled:Boolean) {
+        auth.setNotificationPreview(enabled)
+        _state.value=_state.value.copy(notificationPreview=enabled)
+    }
+    fun setNotificationSound(enabled:Boolean) {
+        auth.setNotificationSound(enabled)
+        _state.value=_state.value.copy(notificationSound=enabled)
+        NotificationCenter.ensureChannels(getApplication())
+    }
+    fun setNotificationVibration(enabled:Boolean) {
+        auth.setNotificationVibration(enabled)
+        _state.value=_state.value.copy(notificationVibration=enabled)
+        NotificationCenter.ensureChannels(getApplication())
+    }
+    fun setQuietHours(enabled:Boolean,start:Int,end:Int) {
+        auth.setQuietHours(enabled,start,end)
+        _state.value=_state.value.copy(quietHoursEnabled=enabled,quietHoursStart=start,quietHoursEnd=end)
+    }
     fun setWidgetCaptureMode(mode: String) {
         if (mode !in setOf("instant", "review")) return
         auth.setWidgetCaptureMode(mode)
@@ -294,6 +328,11 @@ class IndexViewModel(
         auth.setWidgetCaptureCategory(category)
         _state.value = _state.value.copy(widgetCaptureCategory = category)
         CaptureWidgetProvider.updateAll(getApplication())
+    }
+    fun setWidgetRecordingMinutes(minutes:Int) {
+        val value=minutes.coerceIn(1,15)
+        auth.setWidgetRecordingMinutes(value)
+        _state.value=_state.value.copy(widgetRecordingMinutes=value)
     }
     fun setFilter(filter: String) { _state.value = _state.value.copy(inboxFilter = filter) }
     fun setCategoryFilter(category: String) { _state.value = _state.value.copy(categoryFilter = category) }
@@ -970,8 +1009,15 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             indexRingSecret=indexRingSecret,
             notificationsEnabled=state.notificationsEnabled,
             instantNotifications=state.instantNotifications,
+            notificationPreview=state.notificationPreview,
+            notificationSound=state.notificationSound,
+            notificationVibration=state.notificationVibration,
+            quietHoursEnabled=state.quietHoursEnabled,
+            quietHoursStart=state.quietHoursStart,
+            quietHoursEnd=state.quietHoursEnd,
             widgetCaptureMode=state.widgetCaptureMode,
             widgetCaptureCategory=state.widgetCaptureCategory,
+            widgetRecordingMinutes=state.widgetRecordingMinutes,
             onBack={viewModel.showScreen("inbox")},
             onBackup=viewModel::createBackup,
             onRetention=viewModel::runRetention,
@@ -980,8 +1026,13 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onBackupHook=viewModel::triggerBackupHook,
             onNotifications=viewModel::setNotifications,
             onInstantNotifications=viewModel::setInstantNotifications,
+            onNotificationPreview=viewModel::setNotificationPreview,
+            onNotificationSound=viewModel::setNotificationSound,
+            onNotificationVibration=viewModel::setNotificationVibration,
+            onQuietHours=viewModel::setQuietHours,
             onWidgetCaptureMode=viewModel::setWidgetCaptureMode,
             onWidgetCaptureCategory=viewModel::setWidgetCaptureCategory,
+            onWidgetRecordingMinutes=viewModel::setWidgetRecordingMinutes,
             onRevokeOthers=viewModel::revokeOtherDevices,
             onCheckUpdate=viewModel::checkForUpdate,
             onInstallUpdate=viewModel::installUpdate,
@@ -1664,8 +1715,15 @@ private fun StatusScreen(
     indexRingSecret: String?,
     notificationsEnabled: Boolean,
     instantNotifications: Boolean,
+    notificationPreview:Boolean,
+    notificationSound:Boolean,
+    notificationVibration:Boolean,
+    quietHoursEnabled:Boolean,
+    quietHoursStart:Int,
+    quietHoursEnd:Int,
     widgetCaptureMode: String,
     widgetCaptureCategory: String,
+    widgetRecordingMinutes:Int,
     onBack: () -> Unit,
     onBackup: () -> Unit,
     onRetention: (Int) -> Unit,
@@ -1674,8 +1732,13 @@ private fun StatusScreen(
     onBackupHook: () -> Unit,
     onNotifications: (Boolean) -> Unit,
     onInstantNotifications: (Boolean) -> Unit,
+    onNotificationPreview:(Boolean)->Unit,
+    onNotificationSound:(Boolean)->Unit,
+    onNotificationVibration:(Boolean)->Unit,
+    onQuietHours:(Boolean,Int,Int)->Unit,
     onWidgetCaptureMode: (String) -> Unit,
     onWidgetCaptureCategory: (String) -> Unit,
+    onWidgetRecordingMinutes:(Int)->Unit,
     onRevokeOthers: () -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -1687,6 +1750,8 @@ private fun StatusScreen(
     var days by remember { mutableStateOf("30") }
     var integrationAction by remember { mutableStateOf<String?>(null) }
     var integrationPassword by remember { mutableStateOf("") }
+    var quietStart by remember(quietHoursStart){mutableStateOf(quietHoursStart.toString())}
+    var quietEnd by remember(quietHoursEnd){mutableStateOf(quietHoursEnd.toString())}
     val clipboard=LocalClipboardManager.current
     val markdownExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri -> if(uri!=null)onExport("markdown",uri) }
     val jsonExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> if(uri!=null)onExport("json",uri) }
@@ -1792,6 +1857,46 @@ private fun StatusScreen(
                 }
                 Switch(checked=instantNotifications,onCheckedChange=onInstantNotifications,enabled=notificationsEnabled)
             }
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Text("Show note previews",Modifier.weight(1f))
+                Switch(checked=notificationPreview,onCheckedChange=onNotificationPreview,enabled=notificationsEnabled)
+            }
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Text("Sound",Modifier.weight(1f))
+                Switch(checked=notificationSound,onCheckedChange=onNotificationSound,enabled=notificationsEnabled)
+            }
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Text("Vibration",Modifier.weight(1f))
+                Switch(checked=notificationVibration,onCheckedChange=onNotificationVibration,enabled=notificationsEnabled)
+            }
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)){
+                    Text("Quiet hours")
+                    Text("Notifications arrive silently during this window",style=MaterialTheme.typography.labelSmall)
+                }
+                Switch(
+                    checked=quietHoursEnabled,
+                    onCheckedChange={
+                        onQuietHours(it,quietStart.toIntOrNull()?.coerceIn(0,23)?:22,quietEnd.toIntOrNull()?.coerceIn(0,23)?:7)
+                    },
+                    enabled=notificationsEnabled,
+                )
+            }
+            if(quietHoursEnabled) {
+                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        quietStart,{quietStart=it.filter(Char::isDigit).take(2)},
+                        label={Text("From (0–23)")},singleLine=true,modifier=Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        quietEnd,{quietEnd=it.filter(Char::isDigit).take(2)},
+                        label={Text("Until (0–23)")},singleLine=true,modifier=Modifier.weight(1f),
+                    )
+                }
+                OutlinedButton(
+                    onClick={onQuietHours(true,quietStart.toIntOrNull()?.coerceIn(0,23)?:22,quietEnd.toIntOrNull()?.coerceIn(0,23)?:7)},
+                ){Text("Save quiet hours")}
+            }
             HorizontalDivider()
             Text("Home-screen audio widget",fontWeight=FontWeight.Bold)
             Text("Add the Index Inbox widget from your launcher. Tap once to record and again to stop.")
@@ -1819,6 +1924,16 @@ private fun StatusScreen(
                         selected=widgetCaptureCategory==category,
                         onClick={onWidgetCaptureCategory(category)},
                         label={Text(category.replaceFirstChar(Char::uppercase))},
+                    )
+                }
+            }
+            Text("Maximum recording length",fontWeight=FontWeight.Bold)
+            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                listOf(1,3,5,10,15).forEach { minutes ->
+                    FilterChip(
+                        selected=widgetRecordingMinutes==minutes,
+                        onClick={onWidgetRecordingMinutes(minutes)},
+                        label={Text("$minutes min")},
                     )
                 }
             }
@@ -1952,10 +2067,15 @@ private fun PendingCaptureCard(
 
 @Composable
 private fun StarStateIcon(starred:Boolean) {
+    val dark=MaterialTheme.colorScheme.background.luminance()<0.5f
     Icon(
         imageVector=if(starred)Icons.Default.Star else Icons.Outlined.StarBorder,
         contentDescription=if(starred)"Unstar note" else "Star note",
-        tint=if(starred)androidx.compose.ui.graphics.Color(0xFFFFCA28) else androidx.compose.ui.graphics.Color.White,
+        tint=when {
+            starred -> androidx.compose.ui.graphics.Color(0xFFFFCA28)
+            dark -> androidx.compose.ui.graphics.Color.White
+            else -> androidx.compose.ui.graphics.Color(0xFF315C49)
+        },
     )
 }
 
