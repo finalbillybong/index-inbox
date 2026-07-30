@@ -1253,7 +1253,16 @@ private fun InboxScreen(
                                 Text(formatDate(entry.createdAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             IconButton(onClick = { onStar(entry) }) {
-                                Icon(if (entry.starred == 1) Icons.Default.Star else Icons.Outlined.Star, "Star")
+                                val starred=entry.starred==1
+                                Icon(
+                                    imageVector=if(starred)Icons.Default.Star else Icons.Outlined.Star,
+                                    contentDescription=if(starred)"Unstar note" else "Star note",
+                                    tint=if(starred) {
+                                        androidx.compose.ui.graphics.Color(0xFFFFCA28)
+                                    } else {
+                                        androidx.compose.ui.graphics.Color.White
+                                    },
+                                )
                             }
                         }
                         HorizontalDivider()
