@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -137,6 +138,36 @@ class LocalAuthTests(unittest.TestCase):
                 "SELECT transcription FROM entries WHERE id=?",(first.json["id"],),
             ).fetchall()
         self.assertEqual([row["transcription"] for row in rows],["first transcription"])
+
+    def test_reminder_parser_supports_relative_and_calendar_phrases(self):
+        reference=datetime(2026,7,30,12,0,tzinfo=timezone.utc)
+        relative=self.module.parse_reminder("Remind me to call Mum in 20 minutes",reference)
+        tomorrow=self.module.parse_reminder("remind me send the invoice tomorrow at 9 am",reference)
+        dated=self.module.parse_reminder("Remind me renew the certificate on 2026-08-04 at 14:30",reference)
+        self.assertEqual(relative,{"text":"call Mum","due_at":"2026-07-30T12:20:00+00:00"})
+        self.assertEqual(tomorrow,{"text":"send the invoice","due_at":"2026-07-31T09:00:00+00:00"})
+        self.assertEqual(dated,{"text":"renew the certificate","due_at":"2026-08-04T14:30:00+00:00"})
+        self.assertIsNone(self.module.parse_reminder("Perhaps remind me about this sometime",reference))
+
+    def test_manual_reminder_is_stored_and_available_in_reminder_feed(self):
+        login=self.device_login();headers={"Authorization":f"Bearer {login.json['token']}"}
+        with patch.object(self.module,"now",return_value="2026-07-30T12:00:00+00:00"),patch.object(
+            self.module,"datetime",wraps=datetime,
+        ) as mocked_datetime:
+            mocked_datetime.now.return_value=datetime(2026,7,30,12,0,tzinfo=timezone.utc)
+            response=self.client.post("/api/manual",json={
+                "transcription":"Remind me to call Mum tomorrow at 9 am",
+                "id":"reminder-test",
+            },headers=headers)
+        self.assertEqual(response.status_code,201)
+        reminders=self.client.get("/api/entries?view=reminders",headers=headers)
+        self.assertEqual(reminders.status_code,200)
+        item=next(row for row in reminders.json["items"] if row["id"]==response.json["id"])
+        self.assertEqual(item["transcription"],"call Mum")
+        self.assertEqual(item["category"],"task")
+        self.assertEqual(item["due_at"],"2026-07-31T09:00:00+00:00")
+        completed=self.client.patch(f"/api/entries/{item['id']}",json={"reminder_completed":True},headers=headers)
+        self.assertEqual(completed.status_code,200)
 
     def test_device_token_is_hashed_and_wrong_token_is_rejected(self):
         login=self.device_login()

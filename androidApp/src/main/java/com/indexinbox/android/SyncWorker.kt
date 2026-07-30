@@ -22,7 +22,9 @@ class SyncWorker(context: Context, parameters: WorkerParameters) : CoroutineWork
             val previous = preferences.getLong("change_sequence", -1)
             val feed = api.changes(if (previous >= 0) previous else null)
             preferences.edit().putLong("change_sequence", feed.sequence).apply()
-            IndexDatabase.get(applicationContext).entries().replaceAll(fetchAllEntries(api))
+            val entries=fetchAllEntries(api)
+            IndexDatabase.get(applicationContext).entries().replaceAll(entries)
+            ReminderWorker.reconcile(applicationContext,entries)
             if (previous >= 0 && auth.notificationsEnabled) feed.events.forEach { NotificationCenter.showEvent(applicationContext,it) }
             Result.success()
         } catch (_: Exception) {

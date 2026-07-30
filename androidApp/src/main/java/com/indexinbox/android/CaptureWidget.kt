@@ -311,7 +311,9 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
             uploadPendingCapture(api, capture)
             file.delete()
             runCatching {
-                IndexDatabase.get(applicationContext).entries().replaceAll(fetchAllEntries(ApiFactory.create(server, token)))
+                val entries=fetchAllEntries(ApiFactory.create(server,token))
+                IndexDatabase.get(applicationContext).entries().replaceAll(entries)
+                ReminderWorker.reconcile(applicationContext,entries)
             }
             CaptureWidgetState.set(applicationContext, "saved")
             Result.success()
@@ -320,6 +322,7 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
                 val acknowledged=runCatching {
                     val entries=fetchAllEntries(api)
                     IndexDatabase.get(applicationContext).entries().replaceAll(entries)
+                    ReminderWorker.reconcile(applicationContext,entries)
                     entries.any { it.sourceKey==manualCaptureSourceKey(capture.id) }
                 }.getOrDefault(false)
                 if(acknowledged) {

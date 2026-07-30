@@ -29,4 +29,24 @@ class InboxFilterTest {
             filterInboxEntries(entries,"needle","active","task","").map{it.id},
         )
     }
+
+    @Test
+    fun reminderFeedExcludesCompletedAndArchivedEntries() {
+        val entries=listOf(
+            Entry(id="due",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z"),
+            Entry(id="complete",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z",reminderCompleted=1),
+            Entry(id="archived",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z",archived=1),
+            Entry(id="note",createdAt="2026-01-01T00:00:00Z"),
+        )
+        assertEquals(listOf("due"),filterInboxEntries(entries,"","reminders","","").map{it.id})
+    }
+
+    @Test
+    fun todayIncludesOverdueButNotFutureReminders() {
+        val entries=listOf(
+            Entry(id="overdue",createdAt="2026-01-01T00:00:00Z",dueAt="2020-01-01T09:00:00Z"),
+            Entry(id="future",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z"),
+        )
+        assertEquals(listOf("overdue"),filterInboxEntries(entries,"","today","","").map{it.id})
+    }
 }

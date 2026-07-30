@@ -39,6 +39,8 @@ data class Entry(
     val archived: Int = 0,
     @SerialName("source_key") val sourceKey: String? = null,
     @SerialName("group_name") val groupName: String? = null,
+    @SerialName("due_at") val dueAt: String? = null,
+    @SerialName("reminder_completed") val reminderCompleted: Int = 0,
 )
 
 @Serializable
@@ -51,6 +53,8 @@ data class EntryUpdate(
     val processed: Boolean? = null,
     val archived: Boolean? = null,
     @SerialName("group_name") val groupName: String? = null,
+    @SerialName("due_at") val dueAt: String? = null,
+    @SerialName("reminder_completed") val reminderCompleted: Boolean? = null,
 )
 
 @Serializable
