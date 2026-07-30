@@ -30,6 +30,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import retrofit2.HttpException
 import java.io.IOException
+import java.time.Instant
 import java.time.ZonedDateTime
 
 class InstantSyncService : Service() {
@@ -78,7 +79,9 @@ class InstantSyncService : Service() {
                     if (feed.sequence != sequence) {
                         sequence = feed.sequence
                         preferences.edit().putLong("change_sequence", sequence).apply()
-                        IndexDatabase.get(this).entries().replaceAll(fetchAllEntries(api))
+                        val entries=fetchAllEntries(api)
+                        IndexDatabase.get(this).entries().replaceAll(entries)
+                        ReminderWorker.reconcile(this,entries)
                     }
                     feed.events.forEach { NotificationCenter.showEvent(this, it) }
                 }
@@ -177,6 +180,36 @@ object NotificationCenter {
         )
     }
 
+    fun showReminder(context:Context,entry:Entry):Boolean {
+        val auth=AuthStore(context)
+        if(!auth.notificationsEnabled)return false
+        if(Build.VERSION.SDK_INT>=33&&
+            ContextCompat.checkSelfPermission(context,Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED
+        )return false
+        ensureChannels(context)
+        val quiet=auth.quietHoursEnabled&&isQuietHour(ZonedDateTime.now().hour,auth.quietHoursStart,auth.quietHoursEnd)
+        val sound=auth.notificationSound&&!quiet
+        val vibration=auth.notificationVibration&&!quiet
+        val body=if(auth.notificationPreview) {
+            entry.transcription.trim().ifBlank{"Your reminder is due"}
+        } else "Open Index Inbox to view this reminder"
+        val notificationId=20_000+entry.id.hashCode().and(0x3fff)
+        val notification=NotificationCompat.Builder(context,notificationChannelId(sound,vibration))
+            .setSmallIcon(R.drawable.ic_notification)
+            .setColor(0xFFFFCA48.toInt())
+            .setContentTitle(entry.title.takeIf{it.isNotBlank()}?:"Reminder")
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setVisibility(if(auth.notificationPreview)NotificationCompat.VISIBILITY_PRIVATE else NotificationCompat.VISIBILITY_SECRET)
+            .setAutoCancel(true)
+            .setContentIntent(launchIntent(context,"entry",entry.id))
+            .addAction(0,"Complete",actionIntent(context,entry.id,ACTION_REMINDER_COMPLETE,notificationId))
+            .addAction(0,"Snooze 10 min",actionIntent(context,entry.id,ACTION_REMINDER_SNOOZE,notificationId))
+            .build()
+        context.getSystemService(NotificationManager::class.java).notify(notificationId,notification)
+        return true
+    }
+
     private fun actionIntent(context:Context,entryId:String,action:String,notificationId:Int)=PendingIntent.getBroadcast(
         context,
         31*entryId.hashCode()+action.hashCode(),
@@ -202,6 +235,8 @@ object NotificationCenter {
     const val ACTION_STAR="com.indexinbox.android.notification.STAR"
     const val ACTION_PROCESSED="com.indexinbox.android.notification.PROCESSED"
     const val ACTION_DELETE="com.indexinbox.android.notification.DELETE"
+    const val ACTION_REMINDER_COMPLETE="com.indexinbox.android.notification.REMINDER_COMPLETE"
+    const val ACTION_REMINDER_SNOOZE="com.indexinbox.android.notification.REMINDER_SNOOZE"
     const val EXTRA_ENTRY_ID="entry_id"
     const val EXTRA_NOTIFICATION_ID="notification_id"
 }
@@ -224,6 +259,8 @@ class NotificationActionReceiver:BroadcastReceiver() {
                 NotificationCenter.ACTION_STAR,
                 NotificationCenter.ACTION_PROCESSED,
                 NotificationCenter.ACTION_DELETE,
+                NotificationCenter.ACTION_REMINDER_COMPLETE,
+                NotificationCenter.ACTION_REMINDER_SNOOZE,
             )
         }?:return
         context.getSystemService(NotificationManager::class.java)
@@ -246,9 +283,18 @@ class NotificationActionWorker(context:Context,params:WorkerParameters):Coroutin
                 NotificationCenter.ACTION_STAR -> api.update(entryId,EntryUpdate(starred=true))
                 NotificationCenter.ACTION_PROCESSED -> api.update(entryId,EntryUpdate(processed=true))
                 NotificationCenter.ACTION_DELETE -> api.delete(entryId)
+                NotificationCenter.ACTION_REMINDER_COMPLETE ->
+                    api.update(entryId,EntryUpdate(reminderCompleted=true))
+                NotificationCenter.ACTION_REMINDER_SNOOZE ->
+                    api.update(entryId,EntryUpdate(
+                        dueAt=Instant.now().plusSeconds(600).toString(),
+                        reminderCompleted=false,
+                    ))
                 else -> return Result.failure()
             }
-            IndexDatabase.get(applicationContext).entries().replaceAll(fetchAllEntries(api))
+            val entries=fetchAllEntries(api)
+            IndexDatabase.get(applicationContext).entries().replaceAll(entries)
+            ReminderWorker.reconcile(applicationContext,entries)
             Result.success()
         } catch (error:Exception) {
             if(error is IOException||error is HttpException&&error.code()>=500)Result.retry() else Result.failure()

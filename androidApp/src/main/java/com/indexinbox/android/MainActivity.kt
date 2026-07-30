@@ -262,7 +262,9 @@ class IndexViewModel(
             _state.value=_state.value.copy(loading=true,error=null,syncStatus="Syncing…")
             try {
                 val api=ApiFactory.create(server,token)
-                dao.replaceAll(fetchAllEntries(api))
+                val entries=fetchAllEntries(api)
+                dao.replaceAll(entries)
+                ReminderWorker.reconcile(getApplication(),entries)
                 _groups.value=api.groups()
                 _state.value=_state.value.copy(syncStatus="Synced just now")
             } catch(error:Exception) {
@@ -919,6 +921,8 @@ internal fun filterInboxEntries(
 )=entries.filter {
     when(filter) {
         "all" -> true
+        "today" -> it.dueAt?.let(::isDueBeforeTomorrow)==true&&it.reminderCompleted==0&&it.archived==0
+        "reminders" -> it.dueAt!=null&&it.reminderCompleted==0&&it.archived==0
         "starred" -> it.starred==1&&it.archived==0
         "unprocessed" -> it.processed==0&&it.archived==0
         "archived" -> it.archived==1
@@ -927,6 +931,20 @@ internal fun filterInboxEntries(
 }.filter{categoryFilter.isBlank()||it.category==categoryFilter}
  .filter{groupFilter.isBlank()||it.groupName==groupFilter}
  .filter{query.isBlank()||it.title.contains(query,true)||it.transcription.contains(query,true)||it.tags.contains(query,true)}
+
+internal fun isDueBeforeTomorrow(value:String):Boolean=runCatching {
+    val due=java.time.Instant.parse(value)
+    val tomorrow=java.time.ZonedDateTime.now().plusDays(1).toLocalDate()
+        .atStartOfDay(java.time.ZoneId.systemDefault()).toInstant()
+    due<tomorrow
+}.getOrDefault(false)
+
+private fun reminderDate(value:String?)=value?.let {
+    runCatching {
+        java.time.Instant.parse(it).atZone(java.time.ZoneId.systemDefault())
+            .format(java.time.format.DateTimeFormatter.ofPattern("EEE d MMM, HH:mm"))
+    }.getOrDefault(it)
+}.orEmpty()
 
 private fun indexColorScheme(dark: Boolean) = if (dark) {
     androidx.compose.material3.darkColorScheme(
@@ -1261,7 +1279,7 @@ private fun InboxScreen(
                 if(pendingCount>0) TextButton(onClick=onPending){Text("Review")}
             }
             Box(Modifier.padding(horizontal=16.dp,vertical=4.dp)) {
-                val stateLabel = mapOf("active" to "Active","all" to "All","unprocessed" to "Unprocessed","starred" to "Starred","archived" to "Archived")[filter] ?: "Active"
+                val stateLabel = mapOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","starred" to "Starred","archived" to "Archived")[filter] ?: "Active"
                 val typeLabel = mapOf("" to "All types","note" to "Notes","task" to "Tasks","idea" to "Ideas","question" to "Questions")[categoryFilter] ?: "All types"
                 OutlinedButton(onClick={filtersExpanded=true}) {
                     Icon(Icons.Default.FilterList,null)
@@ -1270,7 +1288,7 @@ private fun InboxScreen(
                 }
                 DropdownMenu(expanded=filtersExpanded,onDismissRequest={filtersExpanded=false}) {
                     Text("State",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
-                    listOf("active" to "Active","all" to "All","unprocessed" to "Unprocessed","starred" to "Starred","archived" to "Archived").forEach { (value,label) ->
+                    listOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","starred" to "Starred","archived" to "Archived").forEach { (value,label) ->
                         DropdownMenuItem(
                             text={Text(label)},
                             leadingIcon={if(filter==value) Icon(Icons.Default.Check,null)},
@@ -1341,6 +1359,12 @@ private fun InboxScreen(
                             Column(Modifier.weight(1f)) {
                                 Text(entry.title.ifBlank { entry.category.uppercase() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                                 Text(entry.transcription.ifBlank { "Audio recording" }, maxLines = 3, style = MaterialTheme.typography.bodyLarge)
+                                if(entry.dueAt!=null)Text(
+                                    "${if(entry.reminderCompleted==1)"Completed" else "Reminder"} • ${reminderDate(entry.dueAt)}",
+                                    style=MaterialTheme.typography.labelSmall,
+                                    color=if(entry.reminderCompleted==1)MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+                                    fontWeight=FontWeight.Bold,
+                                )
                                 Text(formatDate(entry.createdAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             IconButton(onClick = { onStar(entry) }) {
@@ -1372,6 +1396,7 @@ private fun EntryScreen(
     var title by remember(entry.id) { mutableStateOf(entry.title) }
     var text by remember(entry.id) { mutableStateOf(entry.transcription) }
     var tags by remember(entry.id) { mutableStateOf(entry.tags) }
+    var dueAt by remember(entry.id,entry.dueAt){mutableStateOf(entry.dueAt.orEmpty())}
     var confirmDelete by remember { mutableStateOf(false) }
     var showPayload by remember { mutableStateOf(false) }
     val audioDownload=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(entry.audioMime ?: "audio/*")) { uri ->
@@ -1399,7 +1424,13 @@ private fun EntryScreen(
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             actions = {
                 IconButton(onClick=onStar,enabled=!loading){StarStateIcon(entry.starred==1)}
-                IconButton(onClick = { onSave(EntryUpdate(title = title, transcription = text, tags = tags)) }, enabled = !loading) { Icon(Icons.Default.Check, "Save") }
+                IconButton(
+                    onClick={onSave(EntryUpdate(
+                        title=title,transcription=text,tags=tags,dueAt=dueAt,
+                        reminderCompleted=if(dueAt.isBlank())false else null,
+                    ))},
+                    enabled=!loading,
+                ){Icon(Icons.Default.Check,"Save")}
             },
         )
     }) { padding ->
@@ -1411,6 +1442,27 @@ private fun EntryScreen(
             OutlinedTextField(title, { title = it }, label = { Text("Title") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(text, { text = it }, label = { Text("Transcription") }, minLines = 7, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(tags, { tags = it }, label = { Text("Tags") }, modifier = Modifier.fillMaxWidth())
+            Text("Reminder",style=MaterialTheme.typography.labelMedium)
+            OutlinedTextField(
+                dueAt,{dueAt=it},label={Text("Due time (ISO 8601)")},
+                placeholder={Text("2026-08-01T09:00:00+01:00")},
+                singleLine=true,modifier=Modifier.fillMaxWidth(),
+            )
+            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick={
+                    dueAt=java.time.ZonedDateTime.now().plusHours(1).withSecond(0).withNano(0)
+                        .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                }){Text("In 1 hour")}
+                OutlinedButton(onClick={
+                    dueAt=java.time.ZonedDateTime.now().plusDays(1).withHour(9).withMinute(0).withSecond(0).withNano(0)
+                        .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                }){Text("Tomorrow 9:00")}
+                OutlinedButton(onClick={dueAt=""}){Text("Remove")}
+            }
+            if(entry.dueAt!=null)Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Text("Completed",Modifier.weight(1f))
+                Switch(checked=entry.reminderCompleted==1,onCheckedChange={onSave(EntryUpdate(reminderCompleted=it))})
+            }
             Text("Category", style = MaterialTheme.typography.labelMedium)
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("note","task","idea","question").forEach { category ->

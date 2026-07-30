@@ -40,6 +40,18 @@ test.describe.serial('Index Inbox browser flows', () => {
     await expect(page.locator('#entries textarea.text')).toHaveValue('browser capture arrived');
   });
 
+  test('natural-language reminder appears in Today and can be completed', async ({ page, request }) => {
+    await login(page);
+    await webhook(request, 'Remind me to test the browser reminder in 20 minutes');
+    await page.locator('#state').selectOption('today');
+    const card=page.locator('.card').filter({has:page.locator('.reminder-completed:not(:disabled)')}).first();
+    await expect(card).toBeVisible();
+    await expect(card.locator('textarea.text')).toHaveValue('test the browser reminder');
+    await expect(card.locator('.due-at')).not.toHaveValue('');
+    await card.locator('.reminder-completed').check();
+    await expect(card).toBeHidden();
+  });
+
   test('authenticated web app downloads the embedded Android release', async ({ page }) => {
     await login(page);
     const button = page.locator('#android-install');

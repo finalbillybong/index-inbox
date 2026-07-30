@@ -263,6 +263,10 @@ Native settings can disable all activity notifications or independently stop the
 
 Notification settings also control note previews, sound, vibration, and configurable quiet hours. Quiet-hour notifications are delivered silently rather than discarded. The home-screen audio widget supports configurable 1, 3, 5, 10, or 15 second recording limits.
 
+Natural-language captures can create reminders without a cloud service. Try `Remind me to call Mum in 20 minutes`, `Remind me to put the bins out tomorrow at 9`, or `Remind me to renew the pass on 2026-08-14 at 14:30`. Index Inbox stores the action as a task and interprets calendar times using `REMINDER_TIMEZONE`. Deliberately unambiguous English phrases are supported; anything it cannot confidently parse remains an ordinary note.
+
+The web and Android inboxes include **Today** and **Reminders** views. Reminder times can be changed or removed from entry details and reminders can be marked complete. Android schedules due notifications locally after synchronization, shows the note preview according to the existing privacy setting, and offers **Complete** and **Snooze 10 min** actions. The server remains the source of truth, so changes made by either client are reconciled on the next sync.
+
 The native parity audit covers inbox search and state/category/group filters, group and alias administration, activity, exports, verified backups, audio retention, and device-session management. Server-only command-line recovery and deployment controls intentionally remain outside the Android client.
 
 Text and audio captures that fail because the network is unavailable or the server returns a 5xx response are stored durably in the Room pending queue. Audio is copied to app-private storage before the capture screen closes. WorkManager retries with network constraints, stable recorded timestamps make retries idempotent, and the Pending screen supports editing metadata or discarding queued text and audio. Client errors such as invalid authentication remain visible instead of being silently queued.

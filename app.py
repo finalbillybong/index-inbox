@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from functools import wraps
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import firebase_admin
 from firebase_admin import auth
@@ -42,6 +43,9 @@ TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "tiny.en").strip()
 TRANSCRIPTION_LANGUAGE = os.getenv("TRANSCRIPTION_LANGUAGE", "en").strip() or None
 TRANSCRIPTION_THREADS = max(int(os.getenv("TRANSCRIPTION_THREADS", "4")), 1)
 TRANSCRIPTION_MODEL_DIR = DATA_DIR / "models"
+REMINDER_TIMEZONE = os.getenv("REMINDER_TIMEZONE", "UTC").strip() or "UTC"
+try:REMINDER_ZONE=ZoneInfo(REMINDER_TIMEZONE)
+except ZoneInfoNotFoundError as error:raise RuntimeError(f"Unknown REMINDER_TIMEZONE: {REMINDER_TIMEZONE}") from error
 _TRANSCRIPTION_MODEL = None
 _TRANSCRIPTION_LOCK = threading.Lock()
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
@@ -95,7 +99,8 @@ def init_db():
     """)
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
-      "archived":"INTEGER NOT NULL DEFAULT 0", "source_key":"TEXT", "group_name":"TEXT"}
+      "archived":"INTEGER NOT NULL DEFAULT 0", "source_key":"TEXT", "group_name":"TEXT",
+      "due_at":"TEXT","reminder_completed":"INTEGER NOT NULL DEFAULT 0"}
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
     login_columns={r[1] for r in con.execute("PRAGMA table_info(login_attempts)")}
@@ -397,6 +402,43 @@ def normalize_timestamp(value):
         return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
     except (ValueError, OverflowError, OSError): return text
 
+def parse_clock(value,meridiem=None):
+    match=re.fullmatch(r"(\d{1,2})(?::(\d{2}))?",str(value).strip())
+    if not match:return None
+    hour=int(match.group(1)); minute=int(match.group(2) or 0); meridiem=(meridiem or "").lower()
+    if minute>59 or (meridiem and not 1<=hour<=12) or (not meridiem and hour>23):return None
+    if meridiem=="pm" and hour<12:hour+=12
+    if meridiem=="am" and hour==12:hour=0
+    return hour,minute
+
+def parse_reminder(text,reference=None):
+    command=re.match(r"^\s*remind\s+me(?:\s+to)?\s+(.+?)\s*[.!]?\s*$",str(text),re.IGNORECASE|re.DOTALL)
+    if not command:return None
+    body=command.group(1).strip(); local=(reference or datetime.now(REMINDER_ZONE)).astimezone(REMINDER_ZONE)
+    relative=re.fullmatch(r"(.+?)\s+in\s+(\d+)\s+(minute|minutes|hour|hours|day|days)",body,re.IGNORECASE|re.DOTALL)
+    if relative:
+        amount=int(relative.group(2)); unit=relative.group(3).lower()
+        if amount<1:return None
+        delta=timedelta(minutes=amount) if unit.startswith("minute") else timedelta(hours=amount) if unit.startswith("hour") else timedelta(days=amount)
+        due=local+delta; action=relative.group(1).strip()
+    else:
+        dated=re.fullmatch(
+            r"(.+?)\s+(today|tomorrow|on\s+\d{4}-\d{2}-\d{2})(?:\s+at\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?)?",
+            body,re.IGNORECASE|re.DOTALL,
+        )
+        if not dated:return None
+        action=dated.group(1).strip(); day=dated.group(2).lower(); clock=parse_clock(dated.group(3) or "9",dated.group(4))
+        if not clock:return None
+        if day=="today":date=local.date()
+        elif day=="tomorrow":date=(local+timedelta(days=1)).date()
+        else:
+            try:date=datetime.strptime(day[3:],"%Y-%m-%d").date()
+            except ValueError:return None
+        due=datetime(date.year,date.month,date.day,*clock,tzinfo=REMINDER_ZONE)
+        if due<=local and day=="today":return None
+    if not action:return None
+    return {"text":action,"due_at":due.astimezone(timezone.utc).isoformat()}
+
 def voice_category(text):
     aliases={"note":"note","idea":"idea","task":"task","todo":"task","to-do":"task","reminder":"task","question":"question"}
     match=re.match(r"^\s*(note|idea|task|todo|to-do|reminder|question)(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.IGNORECASE|re.DOTALL)
@@ -549,11 +591,15 @@ def store_entry(payload, upload=None, source="ring"):
         created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created group' if created else 'Group already exists:'} {group_to_create}",group_to_create)
         return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
     group_name,transcription=match_note_group(transcription)
+    reminder=parse_reminder(transcription)
+    due_at=normalize_timestamp(first(payload,("due_at","dueAt"),None))
+    if reminder and not due_at:
+        transcription=reminder["text"]; due_at=reminder["due_at"]; category="task"
     audio_path=audio_mime=None
     if upload and upload.filename:
         suffix=Path(upload.filename).suffix.lower()[:10] or ".bin"; audio_path=f"{entry_id}{suffix}"; audio_mime=upload.mimetype or "application/octet-stream"; upload.save(AUDIO_DIR/audio_path)
-    db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name)); db().commit()
+    db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name,due_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name,due_at)); db().commit()
     if unrecognized_group_command:
         log_activity("warning","group_unrecognized","Could not create a group from that command",entry_id)
     elif group_name:
@@ -708,15 +754,22 @@ def entries():
     if q: where.append("(transcription LIKE ? OR title LIKE ? OR tags LIKE ?)"); values += [f"%{q}%"]*3
     for field in ("category","processed","starred","archived","group_name"):
         if request.args.get(field) not in (None,""): where.append(f"{field}=?"); values.append(request.args[field])
+    view=request.args.get("view","")
+    if view=="reminders":where.append("due_at IS NOT NULL AND reminder_completed=0")
+    elif view=="today":
+        local_tomorrow=datetime.now(REMINDER_ZONE).date()+timedelta(days=1)
+        tomorrow=datetime(local_tomorrow.year,local_tomorrow.month,local_tomorrow.day,tzinfo=REMINDER_ZONE).astimezone(timezone.utc).isoformat()
+        where.append("due_at IS NOT NULL AND due_at<? AND reminder_completed=0");values.append(tomorrow)
     page=max(int(request.args.get("page",1)),1); limit=min(max(int(request.args.get("limit",50)),1),200); clause=" WHERE "+" AND ".join(where) if where else ""
     total=db().execute("SELECT count(*) FROM entries"+clause,values).fetchone()[0]
-    rows=db().execute("SELECT * FROM entries"+clause+" ORDER BY created_at DESC LIMIT ? OFFSET ?",(*values,limit,(page-1)*limit)).fetchall()
+    order="due_at,created_at" if view in {"today","reminders"} else "created_at DESC"
+    rows=db().execute("SELECT * FROM entries"+clause+f" ORDER BY {order} LIMIT ? OFFSET ?",(*values,limit,(page-1)*limit)).fetchall()
     return jsonify(items=[dict(r) for r in rows],page=page,limit=limit,total=total,pages=max(1,(total+limit-1)//limit))
 
 @app.patch("/api/entries/<entry_id>")
 @api_auth
 def update_entry(entry_id):
-    body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category","group_name"}; updates={k:body[k] for k in body if k in allowed}
+    body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category","group_name","due_at","reminder_completed"}; updates={k:body[k] for k in body if k in allowed}
     if "category" in updates and updates["category"] not in VALID_CATEGORIES:return jsonify(error="Invalid category"),400
     if "group_name" in updates:
         requested=normalized_group_name(updates["group_name"]) if updates["group_name"] else None
@@ -726,7 +779,15 @@ def update_entry(entry_id):
             updates["group_name"]=group["display_name"]
         else:updates["group_name"]=None
     if not updates:return jsonify(error="No supported fields supplied"),400
-    previous=db().execute("SELECT group_name FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","archived"} else (None if v is None else str(v)) for k,v in updates.items()]
+    if "due_at" in updates:
+        if updates["due_at"] in (None,""):updates["due_at"]=None
+        else:
+            try:
+                parsed=datetime.fromisoformat(str(updates["due_at"]).replace("Z","+00:00"))
+                if parsed.tzinfo is None:parsed=parsed.replace(tzinfo=REMINDER_ZONE)
+                updates["due_at"]=parsed.astimezone(timezone.utc).isoformat()
+            except ValueError:return jsonify(error="Invalid reminder time"),400
+    previous=db().execute("SELECT group_name FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","archived","reminder_completed"} else (None if v is None else str(v)) for k,v in updates.items()]
     cur=db().execute(f"UPDATE entries SET {', '.join(k+'=?' for k in updates)} WHERE id=?",(*values,entry_id)); db().commit()
     if cur.rowcount and "group_name" in updates and previous["group_name"]!=updates["group_name"]:log_activity("info","group",f"Moved entry from {previous['group_name'] or 'standalone'} to {updates['group_name'] or 'standalone'}",entry_id)
     return (jsonify(ok=True) if cur.rowcount else (jsonify(error="Not found"),404))
