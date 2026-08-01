@@ -13,9 +13,13 @@ ARG ANDROID_UPDATE_VERSION_NAME
 ENV ANDROID_UPDATE_APK_PATH=/app/releases/index-inbox.apk \
     ANDROID_UPDATE_VERSION_CODE=${ANDROID_UPDATE_VERSION_CODE} \
     ANDROID_UPDATE_VERSION_NAME=${ANDROID_UPDATE_VERSION_NAME}
-COPY app.py .
+COPY app.py reminders.py ./
 COPY static ./static
 COPY .release/index-inbox.apk ./releases/index-inbox.apk
+
+RUN DATA_DIR=/tmp/index-inbox-build AUTH_PROVIDER=local WEBHOOK_SECRET=build-smoke-test \
+    python -c "import app" \
+    && rm -rf /tmp/index-inbox-build
 
 RUN useradd --system --uid 1000 --create-home index \
     && mkdir -p /data \
