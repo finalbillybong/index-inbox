@@ -5,8 +5,12 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py .
+COPY app.py reminders.py ./
 COPY static ./static
+
+RUN DATA_DIR=/tmp/index-inbox-build AUTH_PROVIDER=local WEBHOOK_SECRET=build-smoke-test \
+    python -c "import app" \
+    && rm -rf /tmp/index-inbox-build
 
 RUN useradd --system --uid 1000 --create-home index && mkdir -p /data && chown index:index /data
 USER index
