@@ -403,7 +403,7 @@ def normalize_timestamp(value):
     except (ValueError, OverflowError, OSError): return text
 
 def parse_clock(value,meridiem=None):
-    match=re.fullmatch(r"(\d{1,2})(?::(\d{2}))?",str(value).strip())
+    match=re.fullmatch(r"(\d{1,2})(?:[:.](\d{2}))?",str(value).strip())
     if not match:return None
     hour=int(match.group(1)); minute=int(match.group(2) or 0); meridiem=(meridiem or "").lower()
     if minute>59 or (meridiem and not 1<=hour<=12) or (not meridiem and hour>23):return None
@@ -423,7 +423,7 @@ def parse_reminder(text,reference=None):
         due=local+delta; action=relative.group(1).strip()
     else:
         dated=re.fullmatch(
-            r"(.+?)\s+(today|tomorrow|on\s+\d{4}-\d{2}-\d{2})(?:\s+at\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?)?",
+            r"(.+?)\s+(today|tomorrow|on\s+\d{4}-\d{2}-\d{2})(?:\s+at\s+(\d{1,2}(?:[:.]\d{2})?)\s*(am|pm)?)?",
             body,re.IGNORECASE|re.DOTALL,
         )
         if dated:
@@ -437,9 +437,13 @@ def parse_reminder(text,reference=None):
             due=datetime(date.year,date.month,date.day,*clock,tzinfo=REMINDER_ZONE)
             if due<=local and day=="today":return None
         else:
-            timed=re.fullmatch(r"(.+?)\s+at\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?",body,re.IGNORECASE|re.DOTALL)
-            if not timed:return None
-            action=timed.group(1).strip(); clock=parse_clock(timed.group(2),timed.group(3))
+            timed=re.fullmatch(r"(.+?)\s+at\s+(\d{1,2}(?:[:.]\d{2})?)\s*(am|pm)?",body,re.IGNORECASE|re.DOTALL)
+            time_first=re.fullmatch(r"at\s+(\d{1,2}(?:[:.]\d{2})?)\s*(am|pm)?\s+(?:to\s+)?(.+)",body,re.IGNORECASE|re.DOTALL)
+            if timed:
+                action=timed.group(1).strip(); clock=parse_clock(timed.group(2),timed.group(3))
+            elif time_first:
+                action=time_first.group(3).strip(); clock=parse_clock(time_first.group(1),time_first.group(2))
+            else:return None
             if not clock:return None
             due=datetime(local.year,local.month,local.day,*clock,tzinfo=REMINDER_ZONE)
             if due<=local:due+=timedelta(days=1)

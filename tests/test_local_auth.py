@@ -146,11 +146,15 @@ class LocalAuthTests(unittest.TestCase):
         dated=self.module.parse_reminder("Remind me renew the certificate on 2026-08-04 at 14:30",reference)
         this_evening=self.module.parse_reminder("Remind me to have coffee at 9pm",reference)
         next_morning=self.module.parse_reminder("Remind me to make coffee at 9am",reference)
+        time_first=self.module.parse_reminder("Remind me at 7.30 to have a coffee.",reference)
+        dotted_meridiem=self.module.parse_reminder("Remind me at 7.30pm to have dinner",reference)
         self.assertEqual(relative,{"text":"call Mum","due_at":"2026-07-30T12:20:00+00:00"})
         self.assertEqual(tomorrow,{"text":"send the invoice","due_at":"2026-07-31T09:00:00+00:00"})
         self.assertEqual(dated,{"text":"renew the certificate","due_at":"2026-08-04T14:30:00+00:00"})
         self.assertEqual(this_evening,{"text":"have coffee","due_at":"2026-07-30T21:00:00+00:00"})
         self.assertEqual(next_morning,{"text":"make coffee","due_at":"2026-07-31T09:00:00+00:00"})
+        self.assertEqual(time_first,{"text":"have a coffee","due_at":"2026-07-31T07:30:00+00:00"})
+        self.assertEqual(dotted_meridiem,{"text":"have dinner","due_at":"2026-07-30T19:30:00+00:00"})
         self.assertIsNone(self.module.parse_reminder("Perhaps remind me about this sometime",reference))
 
     def test_manual_reminder_is_stored_and_available_in_reminder_feed(self):
@@ -160,16 +164,16 @@ class LocalAuthTests(unittest.TestCase):
         ) as mocked_datetime:
             mocked_datetime.now.return_value=datetime(2026,7,30,12,0,tzinfo=timezone.utc)
             response=self.client.post("/api/manual",json={
-                "transcription":"Remind me to call Mum tomorrow at 9 am",
+                "transcription":"Remind me at 7.30 to have a coffee.",
                 "id":"reminder-test",
             },headers=headers)
         self.assertEqual(response.status_code,201)
         reminders=self.client.get("/api/entries?view=reminders",headers=headers)
         self.assertEqual(reminders.status_code,200)
         item=next(row for row in reminders.json["items"] if row["id"]==response.json["id"])
-        self.assertEqual(item["transcription"],"call Mum")
+        self.assertEqual(item["transcription"],"have a coffee")
         self.assertEqual(item["category"],"task")
-        self.assertEqual(item["due_at"],"2026-07-31T09:00:00+00:00")
+        self.assertEqual(item["due_at"],"2026-07-31T07:30:00+00:00")
         completed=self.client.patch(f"/api/entries/{item['id']}",json={"reminder_completed":True},headers=headers)
         self.assertEqual(completed.status_code,200)
 
