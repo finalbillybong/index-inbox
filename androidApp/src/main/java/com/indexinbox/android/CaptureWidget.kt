@@ -313,7 +313,7 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
             runCatching {
                 val entries=fetchAllEntries(ApiFactory.create(server,token))
                 IndexDatabase.get(applicationContext).entries().replaceAll(entries)
-                ReminderWorker.reconcile(applicationContext,entries)
+                ReminderScheduler.reconcile(applicationContext,entries)
             }
             CaptureWidgetState.set(applicationContext, "saved")
             Result.success()
@@ -322,7 +322,7 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
                 val acknowledged=runCatching {
                     val entries=fetchAllEntries(api)
                     IndexDatabase.get(applicationContext).entries().replaceAll(entries)
-                    ReminderWorker.reconcile(applicationContext,entries)
+                    ReminderScheduler.reconcile(applicationContext,entries)
                     entries.any { it.sourceKey==manualCaptureSourceKey(capture.id) }
                 }.getOrDefault(false)
                 if(acknowledged) {

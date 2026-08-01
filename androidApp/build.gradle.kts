@@ -16,8 +16,8 @@ android {
         applicationId = "com.indexinbox.android"
         minSdk = 28
         targetSdk = 35
-        versionCode = 32
-        versionName = "0.16.2"
+        versionCode = 33
+        versionName = "0.17.0"
     }
 
     compileOptions {
