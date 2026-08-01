@@ -426,16 +426,23 @@ def parse_reminder(text,reference=None):
             r"(.+?)\s+(today|tomorrow|on\s+\d{4}-\d{2}-\d{2})(?:\s+at\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?)?",
             body,re.IGNORECASE|re.DOTALL,
         )
-        if not dated:return None
-        action=dated.group(1).strip(); day=dated.group(2).lower(); clock=parse_clock(dated.group(3) or "9",dated.group(4))
-        if not clock:return None
-        if day=="today":date=local.date()
-        elif day=="tomorrow":date=(local+timedelta(days=1)).date()
+        if dated:
+            action=dated.group(1).strip(); day=dated.group(2).lower(); clock=parse_clock(dated.group(3) or "9",dated.group(4))
+            if not clock:return None
+            if day=="today":date=local.date()
+            elif day=="tomorrow":date=(local+timedelta(days=1)).date()
+            else:
+                try:date=datetime.strptime(day[3:],"%Y-%m-%d").date()
+                except ValueError:return None
+            due=datetime(date.year,date.month,date.day,*clock,tzinfo=REMINDER_ZONE)
+            if due<=local and day=="today":return None
         else:
-            try:date=datetime.strptime(day[3:],"%Y-%m-%d").date()
-            except ValueError:return None
-        due=datetime(date.year,date.month,date.day,*clock,tzinfo=REMINDER_ZONE)
-        if due<=local and day=="today":return None
+            timed=re.fullmatch(r"(.+?)\s+at\s+(\d{1,2}(?::\d{2})?)\s*(am|pm)?",body,re.IGNORECASE|re.DOTALL)
+            if not timed:return None
+            action=timed.group(1).strip(); clock=parse_clock(timed.group(2),timed.group(3))
+            if not clock:return None
+            due=datetime(local.year,local.month,local.day,*clock,tzinfo=REMINDER_ZONE)
+            if due<=local:due+=timedelta(days=1)
     if not action:return None
     return {"text":action,"due_at":due.astimezone(timezone.utc).isoformat()}
 

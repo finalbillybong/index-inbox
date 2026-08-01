@@ -144,9 +144,13 @@ class LocalAuthTests(unittest.TestCase):
         relative=self.module.parse_reminder("Remind me to call Mum in 20 minutes",reference)
         tomorrow=self.module.parse_reminder("remind me send the invoice tomorrow at 9 am",reference)
         dated=self.module.parse_reminder("Remind me renew the certificate on 2026-08-04 at 14:30",reference)
+        this_evening=self.module.parse_reminder("Remind me to have coffee at 9pm",reference)
+        next_morning=self.module.parse_reminder("Remind me to make coffee at 9am",reference)
         self.assertEqual(relative,{"text":"call Mum","due_at":"2026-07-30T12:20:00+00:00"})
         self.assertEqual(tomorrow,{"text":"send the invoice","due_at":"2026-07-31T09:00:00+00:00"})
         self.assertEqual(dated,{"text":"renew the certificate","due_at":"2026-08-04T14:30:00+00:00"})
+        self.assertEqual(this_evening,{"text":"have coffee","due_at":"2026-07-30T21:00:00+00:00"})
+        self.assertEqual(next_morning,{"text":"make coffee","due_at":"2026-07-31T09:00:00+00:00"})
         self.assertIsNone(self.module.parse_reminder("Perhaps remind me about this sometime",reference))
 
     def test_manual_reminder_is_stored_and_available_in_reminder_feed(self):
