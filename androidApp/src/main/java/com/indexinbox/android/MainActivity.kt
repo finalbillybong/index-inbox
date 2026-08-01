@@ -2,12 +2,14 @@ package com.indexinbox.android
 
 import android.Manifest
 import android.app.Application
+import android.app.AlarmManager
 import android.content.Intent
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Bundle
 import android.os.Build
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -264,7 +266,7 @@ class IndexViewModel(
                 val api=ApiFactory.create(server,token)
                 val entries=fetchAllEntries(api)
                 dao.replaceAll(entries)
-                ReminderWorker.reconcile(getApplication(),entries)
+                ReminderScheduler.reconcile(getApplication(),entries)
                 _groups.value=api.groups()
                 _state.value=_state.value.copy(syncStatus="Synced just now")
             } catch(error:Exception) {
@@ -1360,7 +1362,7 @@ private fun InboxScreen(
                                 Text(entry.title.ifBlank { entry.category.uppercase() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                                 Text(entry.transcription.ifBlank { "Audio recording" }, maxLines = 3, style = MaterialTheme.typography.bodyLarge)
                                 if(entry.dueAt!=null)Text(
-                                    "${if(entry.reminderCompleted==1)"Completed" else "Reminder"} • ${reminderDate(entry.dueAt)}",
+                                    "${if(entry.reminderCompleted==1)"Completed" else "Reminder"} • ${reminderDate(entry.dueAt)}${entry.reminderNotifyBeforeMinutes?.let{" • ${it}m early"}.orEmpty()}",
                                     style=MaterialTheme.typography.labelSmall,
                                     color=if(entry.reminderCompleted==1)MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
                                     fontWeight=FontWeight.Bold,
@@ -1397,6 +1399,7 @@ private fun EntryScreen(
     var text by remember(entry.id) { mutableStateOf(entry.transcription) }
     var tags by remember(entry.id) { mutableStateOf(entry.tags) }
     var dueAt by remember(entry.id,entry.dueAt){mutableStateOf(entry.dueAt.orEmpty())}
+    var notifyBefore by remember(entry.id,entry.reminderNotifyBeforeMinutes){mutableStateOf(entry.reminderNotifyBeforeMinutes?.toString().orEmpty())}
     var confirmDelete by remember { mutableStateOf(false) }
     var showPayload by remember { mutableStateOf(false) }
     val audioDownload=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(entry.audioMime ?: "audio/*")) { uri ->
@@ -1428,6 +1431,7 @@ private fun EntryScreen(
                     onClick={onSave(EntryUpdate(
                         title=title,transcription=text,tags=tags,dueAt=dueAt,
                         reminderCompleted=if(dueAt.isBlank())false else null,
+                        reminderNotifyBeforeMinutes=notifyBefore.toIntOrNull()?:0,
                     ))},
                     enabled=!loading,
                 ){Icon(Icons.Default.Check,"Save")}
@@ -1459,6 +1463,12 @@ private fun EntryScreen(
                 }){Text("Tomorrow 9:00")}
                 OutlinedButton(onClick={dueAt=""}){Text("Remove")}
             }
+            OutlinedTextField(
+                notifyBefore,{value->notifyBefore=value.filter(Char::isDigit).take(5)},
+                label={Text("Early alert (minutes before)")},
+                placeholder={Text("Optional")},singleLine=true,enabled=dueAt.isNotBlank(),
+                modifier=Modifier.fillMaxWidth(),
+            )
             if(entry.dueAt!=null)Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
                 Text("Completed",Modifier.weight(1f))
                 Switch(checked=entry.reminderCompleted==1,onCheckedChange={onSave(EntryUpdate(reminderCompleted=it))})
@@ -1805,6 +1815,8 @@ private fun StatusScreen(
     var quietStart by remember(quietHoursStart){mutableStateOf(quietHoursStart.toString())}
     var quietEnd by remember(quietHoursEnd){mutableStateOf(quietHoursEnd.toString())}
     val clipboard=LocalClipboardManager.current
+    val context=LocalContext.current
+    val exactReminders=Build.VERSION.SDK_INT<Build.VERSION_CODES.S||context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
     val markdownExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri -> if(uri!=null)onExport("markdown",uri) }
     val jsonExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> if(uri!=null)onExport("json",uri) }
     val zipExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> if(uri!=null)onExport("zip",uri) }
@@ -1898,6 +1910,15 @@ private fun StatusScreen(
             }
             HorizontalDivider()
             Text("Notifications",fontWeight=FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Exact reminder timing")
+                    Text(if(exactReminders)"Enabled" else "Using battery-managed fallback",style=MaterialTheme.typography.labelSmall)
+                }
+                if(!exactReminders)OutlinedButton(onClick={
+                    context.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply{data=Uri.parse("package:${context.packageName}")})
+                }){Text("Enable")}
+            }
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
                 Text("Activity notifications",Modifier.weight(1f))
                 Switch(checked=notificationsEnabled,onCheckedChange=onNotifications)

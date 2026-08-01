@@ -20,7 +20,11 @@ async function webhook(request, transcription) {
   return response.json();
 }
 
-test.describe.serial('Index Inbox browser flows', () => {
+test.describe('Index Inbox browser flows', () => {
+  // These tests intentionally build on one server/database lifecycle. Retrying a
+  // serial group replays owner setup against an already-initialized database.
+  test.describe.configure({ mode: 'serial', retries: 0 });
+
   test('first-run owner setup', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('#login-title')).toHaveText('Set up Index Inbox');
@@ -34,20 +38,23 @@ test.describe.serial('Index Inbox browser flows', () => {
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
+    const livePoll = page.waitForRequest(candidate => candidate.url().includes('/api/changes?since='));
     await login(page);
+    await livePoll;
     await webhook(request, 'Note browser capture arrived');
     await expect(page.locator('.capture-notice')).toContainText('Added a standalone note');
     await expect(page.locator('#entries textarea.text')).toHaveValue('browser capture arrived');
   });
 
-  test('natural-language reminder appears in Today and can be completed', async ({ page, request }) => {
+  test('natural-language reminder and early alert can be completed', async ({ page, request }) => {
     await login(page);
-    await webhook(request, 'Remind me to test the browser reminder in 20 minutes');
-    await page.locator('#state').selectOption('today');
+    await webhook(request, 'Remind me tomorrow at 3pm to test the browser reminder with one hour notice');
+    await page.locator('#state').selectOption('reminders');
     const card=page.locator('.card').filter({has:page.locator('.reminder-completed:not(:disabled)')}).first();
     await expect(card).toBeVisible();
     await expect(card.locator('textarea.text')).toHaveValue('test the browser reminder');
     await expect(card.locator('.due-at')).not.toHaveValue('');
+    await expect(card.locator('.notify-before')).toHaveValue('60');
     await card.locator('.reminder-completed').check();
     await expect(card).toBeHidden();
   });

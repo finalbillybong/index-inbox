@@ -41,6 +41,7 @@ data class Entry(
     @SerialName("group_name") val groupName: String? = null,
     @SerialName("due_at") val dueAt: String? = null,
     @SerialName("reminder_completed") val reminderCompleted: Int = 0,
+    @SerialName("reminder_notify_before_minutes") val reminderNotifyBeforeMinutes: Int? = null,
 )
 
 @Serializable
@@ -55,6 +56,7 @@ data class EntryUpdate(
     @SerialName("group_name") val groupName: String? = null,
     @SerialName("due_at") val dueAt: String? = null,
     @SerialName("reminder_completed") val reminderCompleted: Boolean? = null,
+    @SerialName("reminder_notify_before_minutes") val reminderNotifyBeforeMinutes: Int? = null,
 )
 
 @Serializable

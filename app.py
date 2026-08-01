@@ -5,6 +5,8 @@ from functools import wraps
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from reminders import parse_reminder
+
 import firebase_admin
 from firebase_admin import auth
 import click
@@ -44,6 +46,8 @@ TRANSCRIPTION_LANGUAGE = os.getenv("TRANSCRIPTION_LANGUAGE", "en").strip() or No
 TRANSCRIPTION_THREADS = max(int(os.getenv("TRANSCRIPTION_THREADS", "4")), 1)
 TRANSCRIPTION_MODEL_DIR = DATA_DIR / "models"
 REMINDER_TIMEZONE = os.getenv("REMINDER_TIMEZONE", "UTC").strip() or "UTC"
+REMINDER_CLOCK_FORMAT = os.getenv("REMINDER_CLOCK_FORMAT", "24").strip()
+if REMINDER_CLOCK_FORMAT not in {"12","24"}:raise RuntimeError("REMINDER_CLOCK_FORMAT must be 12 or 24")
 try:REMINDER_ZONE=ZoneInfo(REMINDER_TIMEZONE)
 except ZoneInfoNotFoundError as error:raise RuntimeError(f"Unknown REMINDER_TIMEZONE: {REMINDER_TIMEZONE}") from error
 _TRANSCRIPTION_MODEL = None
@@ -100,7 +104,8 @@ def init_db():
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
       "archived":"INTEGER NOT NULL DEFAULT 0", "source_key":"TEXT", "group_name":"TEXT",
-      "due_at":"TEXT","reminder_completed":"INTEGER NOT NULL DEFAULT 0"}
+      "due_at":"TEXT","reminder_completed":"INTEGER NOT NULL DEFAULT 0",
+      "reminder_notify_before_minutes":"INTEGER"}
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
     login_columns={r[1] for r in con.execute("PRAGMA table_info(login_attempts)")}
@@ -402,54 +407,6 @@ def normalize_timestamp(value):
         return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
     except (ValueError, OverflowError, OSError): return text
 
-def parse_clock(value,meridiem=None):
-    match=re.fullmatch(r"(\d{1,2})(?:[:.](\d{2}))?",str(value).strip())
-    if not match:return None
-    hour=int(match.group(1)); minute=int(match.group(2) or 0); meridiem=(meridiem or "").lower()
-    if minute>59 or (meridiem and not 1<=hour<=12) or (not meridiem and hour>23):return None
-    if meridiem=="pm" and hour<12:hour+=12
-    if meridiem=="am" and hour==12:hour=0
-    return hour,minute
-
-def parse_reminder(text,reference=None):
-    command=re.match(r"^\s*remind\s+me(?:\s+to)?\s+(.+?)\s*[.!]?\s*$",str(text),re.IGNORECASE|re.DOTALL)
-    if not command:return None
-    body=command.group(1).strip(); local=(reference or datetime.now(REMINDER_ZONE)).astimezone(REMINDER_ZONE)
-    relative=re.fullmatch(r"(.+?)\s+in\s+(\d+)\s+(minute|minutes|hour|hours|day|days)",body,re.IGNORECASE|re.DOTALL)
-    if relative:
-        amount=int(relative.group(2)); unit=relative.group(3).lower()
-        if amount<1:return None
-        delta=timedelta(minutes=amount) if unit.startswith("minute") else timedelta(hours=amount) if unit.startswith("hour") else timedelta(days=amount)
-        due=local+delta; action=relative.group(1).strip()
-    else:
-        dated=re.fullmatch(
-            r"(.+?)\s+(today|tomorrow|on\s+\d{4}-\d{2}-\d{2})(?:\s+at\s+(\d{1,2}(?:[:.]\d{2})?)\s*(am|pm)?)?",
-            body,re.IGNORECASE|re.DOTALL,
-        )
-        if dated:
-            action=dated.group(1).strip(); day=dated.group(2).lower(); clock=parse_clock(dated.group(3) or "9",dated.group(4))
-            if not clock:return None
-            if day=="today":date=local.date()
-            elif day=="tomorrow":date=(local+timedelta(days=1)).date()
-            else:
-                try:date=datetime.strptime(day[3:],"%Y-%m-%d").date()
-                except ValueError:return None
-            due=datetime(date.year,date.month,date.day,*clock,tzinfo=REMINDER_ZONE)
-            if due<=local and day=="today":return None
-        else:
-            timed=re.fullmatch(r"(.+?)\s+at\s+(\d{1,2}(?:[:.]\d{2})?)\s*(am|pm)?",body,re.IGNORECASE|re.DOTALL)
-            time_first=re.fullmatch(r"at\s+(\d{1,2}(?:[:.]\d{2})?)\s*(am|pm)?\s+(?:to\s+)?(.+)",body,re.IGNORECASE|re.DOTALL)
-            if timed:
-                action=timed.group(1).strip(); clock=parse_clock(timed.group(2),timed.group(3))
-            elif time_first:
-                action=time_first.group(3).strip(); clock=parse_clock(time_first.group(1),time_first.group(2))
-            else:return None
-            if not clock:return None
-            due=datetime(local.year,local.month,local.day,*clock,tzinfo=REMINDER_ZONE)
-            if due<=local:due+=timedelta(days=1)
-    if not action:return None
-    return {"text":action,"due_at":due.astimezone(timezone.utc).isoformat()}
-
 def voice_category(text):
     aliases={"note":"note","idea":"idea","task":"task","todo":"task","to-do":"task","reminder":"task","question":"question"}
     match=re.match(r"^\s*(note|idea|task|todo|to-do|reminder|question)(?:\s*[:.,-]\s*|\s+)(.+)$",text,re.IGNORECASE|re.DOTALL)
@@ -602,15 +559,22 @@ def store_entry(payload, upload=None, source="ring"):
         created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created group' if created else 'Group already exists:'} {group_to_create}",group_to_create)
         return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
     group_name,transcription=match_note_group(transcription)
-    reminder=parse_reminder(transcription)
+    reminder_reference=None
+    if recorded:
+        try:reminder_reference=datetime.fromisoformat(str(recorded).replace("Z","+00:00"))
+        except ValueError:pass
+    reminder=parse_reminder(transcription,reminder_reference,REMINDER_ZONE,REMINDER_CLOCK_FORMAT)
     due_at=normalize_timestamp(first(payload,("due_at","dueAt"),None))
+    notify_before=first(payload,("reminder_notify_before_minutes","reminderNotifyBeforeMinutes"),None)
     if reminder and not due_at:
-        transcription=reminder["text"]; due_at=reminder["due_at"]; category="task"
+        transcription=reminder["text"]; due_at=reminder["due_at"]; notify_before=reminder.get("notify_before_minutes"); category="task"
+    try:notify_before=max(1,min(int(notify_before),10080)) if notify_before not in (None,"") else None
+    except (TypeError,ValueError):notify_before=None
     audio_path=audio_mime=None
     if upload and upload.filename:
         suffix=Path(upload.filename).suffix.lower()[:10] or ".bin"; audio_path=f"{entry_id}{suffix}"; audio_mime=upload.mimetype or "application/octet-stream"; upload.save(AUDIO_DIR/audio_path)
-    db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name,due_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name,due_at)); db().commit()
+    db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name,due_at,reminder_notify_before_minutes)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name,due_at,notify_before)); db().commit()
     if unrecognized_group_command:
         log_activity("warning","group_unrecognized","Could not create a group from that command",entry_id)
     elif group_name:
@@ -780,7 +744,7 @@ def entries():
 @app.patch("/api/entries/<entry_id>")
 @api_auth
 def update_entry(entry_id):
-    body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category","group_name","due_at","reminder_completed"}; updates={k:body[k] for k in body if k in allowed}
+    body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category","group_name","due_at","reminder_completed","reminder_notify_before_minutes"}; updates={k:body[k] for k in body if k in allowed}
     if "category" in updates and updates["category"] not in VALID_CATEGORIES:return jsonify(error="Invalid category"),400
     if "group_name" in updates:
         requested=normalized_group_name(updates["group_name"]) if updates["group_name"] else None
@@ -798,7 +762,14 @@ def update_entry(entry_id):
                 if parsed.tzinfo is None:parsed=parsed.replace(tzinfo=REMINDER_ZONE)
                 updates["due_at"]=parsed.astimezone(timezone.utc).isoformat()
             except ValueError:return jsonify(error="Invalid reminder time"),400
-    previous=db().execute("SELECT group_name FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","archived","reminder_completed"} else (None if v is None else str(v)) for k,v in updates.items()]
+    if "reminder_notify_before_minutes" in updates:
+        if updates["reminder_notify_before_minutes"] in (None,""):updates["reminder_notify_before_minutes"]=None
+        else:
+            try:
+                lead=int(updates["reminder_notify_before_minutes"])
+                updates["reminder_notify_before_minutes"]=min(lead,10080) if lead>0 else None
+            except (TypeError,ValueError):return jsonify(error="Invalid reminder lead time"),400
+    previous=db().execute("SELECT group_name FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","archived","reminder_completed","reminder_notify_before_minutes"} and v is not None else (None if v is None else str(v)) for k,v in updates.items()]
     cur=db().execute(f"UPDATE entries SET {', '.join(k+'=?' for k in updates)} WHERE id=?",(*values,entry_id)); db().commit()
     if cur.rowcount and "group_name" in updates and previous["group_name"]!=updates["group_name"]:log_activity("info","group",f"Moved entry from {previous['group_name'] or 'standalone'} to {updates['group_name'] or 'standalone'}",entry_id)
     return (jsonify(ok=True) if cur.rowcount else (jsonify(error="Not found"),404))

@@ -81,7 +81,7 @@ class InstantSyncService : Service() {
                         preferences.edit().putLong("change_sequence", sequence).apply()
                         val entries=fetchAllEntries(api)
                         IndexDatabase.get(this).entries().replaceAll(entries)
-                        ReminderWorker.reconcile(this,entries)
+                        ReminderScheduler.reconcile(this,entries)
                     }
                     feed.events.forEach { NotificationCenter.showEvent(this, it) }
                 }
@@ -180,7 +180,7 @@ object NotificationCenter {
         )
     }
 
-    fun showReminder(context:Context,entry:Entry):Boolean {
+    fun showReminder(context:Context,entry:Entry,early:Boolean=false):Boolean {
         val auth=AuthStore(context)
         if(!auth.notificationsEnabled)return false
         if(Build.VERSION.SDK_INT>=33&&
@@ -197,7 +197,7 @@ object NotificationCenter {
         val notification=NotificationCompat.Builder(context,notificationChannelId(sound,vibration))
             .setSmallIcon(R.drawable.ic_notification)
             .setColor(0xFFFFCA48.toInt())
-            .setContentTitle(entry.title.takeIf{it.isNotBlank()}?:"Reminder")
+            .setContentTitle(entry.title.takeIf{it.isNotBlank()}?:if(early)"Upcoming reminder" else "Reminder")
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setVisibility(if(auth.notificationPreview)NotificationCompat.VISIBILITY_PRIVATE else NotificationCompat.VISIBILITY_SECRET)
@@ -289,12 +289,13 @@ class NotificationActionWorker(context:Context,params:WorkerParameters):Coroutin
                     api.update(entryId,EntryUpdate(
                         dueAt=Instant.now().plusSeconds(600).toString(),
                         reminderCompleted=false,
+                        reminderNotifyBeforeMinutes=0,
                     ))
                 else -> return Result.failure()
             }
             val entries=fetchAllEntries(api)
             IndexDatabase.get(applicationContext).entries().replaceAll(entries)
-            ReminderWorker.reconcile(applicationContext,entries)
+            ReminderScheduler.reconcile(applicationContext,entries)
             Result.success()
         } catch (error:Exception) {
             if(error is IOException||error is HttpException&&error.code()>=500)Result.retry() else Result.failure()

@@ -165,6 +165,7 @@ class LocalAuthTests(unittest.TestCase):
             mocked_datetime.now.return_value=datetime(2026,7,30,12,0,tzinfo=timezone.utc)
             response=self.client.post("/api/manual",json={
                 "transcription":"Remind me at 7.30 to have a coffee.",
+                "recordedAt":"2026-07-30T12:00:00+00:00",
                 "id":"reminder-test",
             },headers=headers)
         self.assertEqual(response.status_code,201)
@@ -176,6 +177,21 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(item["due_at"],"2026-07-31T07:30:00+00:00")
         completed=self.client.patch(f"/api/entries/{item['id']}",json={"reminder_completed":True},headers=headers)
         self.assertEqual(completed.status_code,200)
+
+    def test_relative_reminder_uses_recording_time_and_persists_early_alert(self):
+        login=self.device_login();headers={"Authorization":f"Bearer {login.json['token']}"}
+        response=self.client.post("/api/manual",json={
+            "transcription":"Remind me in two hours to check the oven with thirty minutes notice",
+            "recordedAt":"2026-07-30T08:00:00+00:00",
+            "id":"anchored-reminder-test",
+        },headers=headers)
+        self.assertEqual(response.status_code,201)
+        item=next(row for row in self.client.get("/api/entries?view=reminders",headers=headers).json["items"] if row["id"]==response.json["id"])
+        self.assertEqual(item["transcription"],"check the oven")
+        self.assertEqual(item["due_at"],"2026-07-30T10:00:00+00:00")
+        self.assertEqual(item["reminder_notify_before_minutes"],30)
+        cleared=self.client.patch(f"/api/entries/{item['id']}",json={"reminder_notify_before_minutes":0},headers=headers)
+        self.assertEqual(cleared.status_code,200)
 
     def test_device_token_is_hashed_and_wrong_token_is_rejected(self):
         login=self.device_login()
