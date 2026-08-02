@@ -74,6 +74,23 @@ test.describe('Index Inbox browser flows', () => {
     await expect(card).toBeHidden();
   });
 
+  test('reminder shortcuts set and remove useful due times', async ({ page, request }) => {
+    await login(page);
+    await webhook(request, 'Remind me tomorrow at 3pm to test browser shortcuts');
+    await page.locator('#state').selectOption('reminders');
+    const shortcutCard = () => page.locator('.entry-card').filter({ hasText: 'test browser shortcuts' });
+    await shortcutCard().locator('.entry-summary').click();
+    await shortcutCard().getByRole('button', { name: 'In 1 hour' }).click();
+    await shortcutCard().locator('.entry-summary').click();
+    const hourValue = await shortcutCard().locator('.due-at').inputValue();
+    expect(new Date(hourValue).getTime()).toBeGreaterThan(Date.now() + 50 * 60 * 1000);
+    await shortcutCard().getByRole('button', { name: 'Tomorrow 9:00' }).click();
+    await shortcutCard().locator('.entry-summary').click();
+    await expect(shortcutCard().locator('.due-at')).toHaveValue(/T09:00$/);
+    await shortcutCard().getByRole('button', { name: 'Remove' }).click();
+    await expect(shortcutCard()).toBeHidden();
+  });
+
   test('authenticated web app downloads the embedded Android release', async ({ page }) => {
     await login(page);
     const button = page.locator('#android-install');
@@ -103,6 +120,7 @@ test.describe('Index Inbox browser flows', () => {
     await webhook(request, 'Create Browser forty two');
     await webhook(request, 'Browzer42 needs review');
     await openMenu(page, '#groups-open');
+    await expect(page.locator('#screen-title')).toHaveText('Groups');
     await expect(page.getByRole('button', { name: 'Review suggestions (1)' })).toBeVisible();
     await page.getByRole('button', { name: 'Review suggestions (1)' }).click();
     await expect(page.locator('.suggestion-row')).toContainText('Suggested: BROWSER42');
@@ -134,18 +152,32 @@ test.describe('Index Inbox browser flows', () => {
     expect(download.suggestedFilename()).toBe('index-inbox-browser43.md');
     await page.getByRole('button', { name: 'Save & Back' }).click();
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' })).toBeVisible();
-    await page.locator('#info-dialog .close').click();
+    await page.locator('#screen-back').click();
+    await expect(page.locator('#app')).toBeVisible();
     await expect.poll(() => page.locator('#entries textarea.text').evaluateAll(nodes => nodes.map(node => node.value))).toContain('review completed in browser');
   });
 
-  test('mobile controls and group dialog remain usable', async ({ page }) => {
+  test('mobile controls and group screen remain usable', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page);
     await expect(page.locator('#nav-capture')).toBeVisible();
     await openMenu(page, '#groups-open');
-    await expect(page.locator('#info-dialog')).toBeVisible();
-    await expect(page.locator('#info-dialog')).toHaveCSS('width', '390px');
+    await expect(page.locator('#secondary-screen')).toBeVisible();
+    await expect(page.locator('#screen-title')).toHaveText('Groups');
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' }).getByRole('button', { name: 'Timeline' })).toBeVisible();
+    await page.goBack();
+    await expect(page.locator('#app')).toBeVisible();
+  });
+
+  test('Recent activity is a refreshable navigable screen', async ({ page }) => {
+    await login(page);
+    await openMenu(page, '#activity-open');
+    await expect(page.locator('#screen-title')).toHaveText('Recent activity');
+    await expect(page.locator('.activity-row').first()).toBeVisible();
+    await page.locator('#screen-refresh').click();
+    await expect(page.locator('.activity-row').first()).toBeVisible();
+    await page.goBack();
+    await expect(page.locator('#app')).toBeVisible();
   });
 
   test('Android mobile header offers only the APK action', async ({ page }) => {
