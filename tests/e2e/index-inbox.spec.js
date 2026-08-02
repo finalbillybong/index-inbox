@@ -39,7 +39,7 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.2.0');
+    await expect(page.locator('.version')).toHaveText('v1.3.0');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
@@ -47,13 +47,13 @@ test.describe('Index Inbox browser flows', () => {
     await login(page);
     await livePoll;
     await webhook(request, 'Note browser capture arrived');
-    await expect(page.locator('.capture-notice')).toContainText('Added a standalone note');
+    await expect(page.locator('.capture-notice')).toContainText('Added a standalone Item');
     const card = page.locator('.entry-card').filter({ has: page.locator('textarea.text') }).first();
     await expect(card.locator('.summary-text')).toHaveText('browser capture arrived');
     await expect(card.locator('.entry-details')).toBeHidden();
     await card.locator('.entry-summary').click();
     await expect(card.locator('.entry-details')).toBeVisible();
-    const saved = page.waitForResponse(response => response.url().includes('/api/entries/') && response.request().method() === 'PATCH');
+    const saved = page.waitForResponse(response => response.url().includes('/api/items/') && response.request().method() === 'PATCH');
     await card.locator('.title').fill('Browser capture');
     await card.locator('.title').press('Tab');
     await saved;
@@ -120,10 +120,14 @@ test.describe('Index Inbox browser flows', () => {
     await webhook(request, 'Create Browser forty two');
     await webhook(request, 'Browzer42 needs review');
     await openMenu(page, '#groups-open');
-    await expect(page.locator('#screen-title')).toHaveText('Groups');
+    await expect(page.locator('#screen-title')).toHaveText('Collections');
+    await page.getByRole('button', { name: 'Create Collection' }).click();
+    await page.locator('#confirm-input').fill('MANUAL44');
+    await page.locator('#confirm-ok').click();
+    await expect(page.locator('.group-row').filter({ hasText: 'MANUAL44' })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Review suggestions (1)' })).toBeVisible();
     await page.getByRole('button', { name: 'Review suggestions (1)' }).click();
-    await expect(page.locator('.suggestion-row')).toContainText('Suggested: BROWSER42');
+    await expect(page.locator('.suggestion-row')).toContainText('Suggested Collection: BROWSER42');
     await page.locator('.suggestion-row').getByRole('button', { name: 'Accept' }).click();
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER42' })).toBeVisible();
 
@@ -143,8 +147,10 @@ test.describe('Index Inbox browser flows', () => {
     await login(page);
     await openMenu(page, '#groups-open');
     const row = page.locator('.group-row').filter({ hasText: 'BROWSER43' });
-    await row.getByRole('button', { name: 'Timeline' }).click();
+    await row.getByRole('button', { name: 'Open' }).click();
     const transcription = page.locator('.timeline-entry textarea').filter({ hasValue: 'needs review' });
+    const timelineItem=transcription.locator('xpath=..');
+    await timelineItem.getByLabel('Completed').check();
     await transcription.fill('review completed in browser');
     const downloadPromise = page.waitForEvent('download');
     await page.getByRole('button', { name: 'Markdown' }).click();
@@ -155,6 +161,8 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#screen-back').click();
     await expect(page.locator('#app')).toBeVisible();
     await expect.poll(() => page.locator('#entries textarea.text').evaluateAll(nodes => nodes.map(node => node.value))).toContain('review completed in browser');
+    await page.locator('#state').selectOption('completed');
+    await expect(page.locator('.entry-card.completed').filter({hasText:'review completed in browser'})).toBeVisible();
   });
 
   test('mobile controls and group screen remain usable', async ({ page }) => {
@@ -163,8 +171,8 @@ test.describe('Index Inbox browser flows', () => {
     await expect(page.locator('#nav-capture')).toBeVisible();
     await openMenu(page, '#groups-open');
     await expect(page.locator('#secondary-screen')).toBeVisible();
-    await expect(page.locator('#screen-title')).toHaveText('Groups');
-    await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' }).getByRole('button', { name: 'Timeline' })).toBeVisible();
+    await expect(page.locator('#screen-title')).toHaveText('Collections');
+    await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' }).getByRole('button', { name: 'Open' })).toBeVisible();
     await page.goBack();
     await expect(page.locator('#app')).toBeVisible();
   });

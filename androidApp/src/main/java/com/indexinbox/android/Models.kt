@@ -105,6 +105,9 @@ data class NoteGroup(
 )
 
 @Serializable
+data class CreateCollectionRequest(val name: String)
+
+@Serializable
 data class ActivityItem(
     val id: Long,
     @SerialName("created_at") val createdAt: String,

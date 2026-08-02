@@ -94,7 +94,7 @@ class CaptureWidgetProvider : AppWidgetProvider() {
             val (title, detail) = when {
                 !ready -> "Set up Index Inbox" to if (auth.token == null) "Tap to sign in" else "Tap to enable microphone"
                 status == "recording" -> "Recording…" to "Tap to stop"
-                status == "uploading" -> "Uploading…" to "Your note is being saved"
+                status == "uploading" -> "Uploading…" to "Your Item is being saved"
                 status == "saved" -> "Saved" to "Tap to record another $category"
                 status == "queued" -> "Saved offline" to "Upload will retry automatically"
                 status == "error" -> "Recording not sent" to CaptureWidgetState.detail(context).ifBlank { "Tap to open Index Inbox" }
