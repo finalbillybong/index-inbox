@@ -630,6 +630,52 @@ class LocalAuthTests(unittest.TestCase):
             self.assertEqual(set(bundle.namelist()),{"entries.json","notes.md",f"audio/{audio_name}"})
             self.assertEqual(bundle.read(f"audio/{audio_name}"),b"test-audio")
 
+    def test_unified_items_compatibility_fixture_preserves_legacy_content(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Compatibility 91"},headers=webhook)
+        payload={
+            "id":"ring-compatibility-91",
+            "transcription":"Compatibility 91 preserve this reminder",
+            "recordedAt":"2026-08-01T18:30:00Z",
+            "dueAt":"2026-08-02T19:30:00Z",
+            "reminderNotifyBeforeMinutes":15,
+            "triggerType":"index-ring",
+            "custom":{"firmware":"fixture"},
+        }
+        capture=self.client.post("/webhook/index",json=payload,headers=webhook)
+        self.assertEqual(capture.status_code,201)
+        entry_id=capture.json["id"]
+        audio_name=f"{entry_id}.webm"
+        with self.module.app.app_context():
+            (self.module.AUDIO_DIR/audio_name).write_bytes(b"compatibility-audio")
+            self.module.db().execute("""UPDATE entries SET audio_path=?,audio_mime=?,processed=1,starred=1
+              WHERE id=?""",(audio_name,"audio/webm",entry_id))
+            self.module.db().commit()
+
+        self.login()
+        row=next(item for item in self.client.get("/api/entries?group_name=COMPATIBILITY91").json["items"] if item["id"]==entry_id)
+        self.assertEqual(row["recorded_at"],"2026-08-01T18:30:00Z")
+        self.assertEqual(row["group_name"],"COMPATIBILITY91")
+        self.assertEqual(row["due_at"],"2026-08-02T19:30:00Z")
+        self.assertEqual(row["reminder_notify_before_minutes"],15)
+        self.assertEqual((row["processed"],row["reminder_completed"]),(1,0))
+        self.assertEqual(json.loads(row["payload_json"])["custom"],{"firmware":"fixture"})
+        audio=self.client.get(f"/api/entries/{entry_id}/audio")
+        self.assertEqual(audio.data,b"compatibility-audio")
+        audio.close()
+
+        exported=json.loads(self.client.get("/api/groups/COMPATIBILITY91/export/json").data)
+        self.assertEqual([item["id"] for item in exported],[entry_id])
+        archive=self.client.get("/api/groups/COMPATIBILITY91/export/zip")
+        with zipfile.ZipFile(io.BytesIO(archive.data)) as bundle:
+            self.assertEqual(bundle.read(f"audio/{audio_name}"),b"compatibility-audio")
+
+        duplicate=self.client.post("/webhook/index",json={**payload,"transcription":"changed retry text"},headers=webhook)
+        self.assertEqual(duplicate.status_code,200)
+        self.assertTrue(duplicate.json["duplicate"])
+        events=self.client.get("/api/activity").json
+        self.assertTrue(any(event["kind"]=="capture_grouped" and event["details"]==entry_id for event in events))
+
     def test_group_timeline_and_exports_reject_unknown_group(self):
         self.login()
         self.assertEqual(self.client.get("/api/groups/UNKNOWN999/timeline").status_code,404)
