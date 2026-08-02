@@ -84,6 +84,15 @@ interface IndexApi {
     @GET("api/activity")
     suspend fun activity(): List<ActivityItem>
 
+    @GET("api/automation")
+    suspend fun automation(): AutomationSettings
+
+    @PATCH("api/automation")
+    suspend fun updateAutomation(@Body update:AutomationUpdate):AutomationSettings
+
+    @POST("api/operations/{id}/undo")
+    suspend fun undoOperation(@Path("id") id:String):UndoOperationResult
+
     @GET("api/collections/{name}/timeline")
     suspend fun groupTimeline(@Path("name") name: String): GroupTimeline
 

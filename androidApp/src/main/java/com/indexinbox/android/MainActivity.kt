@@ -206,6 +206,8 @@ class IndexViewModel(
     val indexRingIntegration: StateFlow<IndexRingIntegration?> = _indexRingIntegration
     private val _indexRingSecret = MutableStateFlow<String?>(null)
     val indexRingSecret: StateFlow<String?> = _indexRingSecret
+    private val _automation = MutableStateFlow<AutomationSettings?>(null)
+    val automation:StateFlow<AutomationSettings?> = _automation
 
     init {
         if (auth.token != null) {
@@ -383,6 +385,16 @@ class IndexViewModel(
         viewModelScope.launch { busy { _activity.value=ApiFactory.create(server,token).activity() } }
     }
 
+    fun undoOperation(receiptId:String) {
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy {
+            val api=ApiFactory.create(server,token)
+            api.undoOperation(receiptId)
+            _activity.value=api.activity()
+            refresh()
+        } }
+    }
+
     fun openGroup(name: String) {
         val server=auth.serverUrl?:return; val token=auth.token?:return
         _state.value=_state.value.copy(screen="timeline")
@@ -485,7 +497,13 @@ class IndexViewModel(
             _devices.value=runCatching{api.devices()}.getOrDefault(emptyList())
             _appUpdate.value=runCatching{api.androidUpdate()}.getOrNull()
             _indexRingIntegration.value=runCatching{api.indexRingIntegration()}.getOrNull()
+            _automation.value=runCatching{api.automation()}.getOrNull()
         } }
+    }
+
+    fun setAutomation(enabled:Boolean) {
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy { _automation.value=ApiFactory.create(server,token).updateAutomation(AutomationUpdate(enabled)) } }
     }
 
     fun revealIndexRingSecret(password:String) {
@@ -1005,6 +1023,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
     val updateDownloadProgress by viewModel.updateDownloadProgress.collectAsState()
     val indexRingIntegration by viewModel.indexRingIntegration.collectAsState()
     val indexRingSecret by viewModel.indexRingSecret.collectAsState()
+    val automation by viewModel.automation.collectAsState()
     val pending by viewModel.pendingCaptures.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -1068,6 +1087,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             updateDownloadProgress=updateDownloadProgress,
             indexRingIntegration=indexRingIntegration,
             indexRingSecret=indexRingSecret,
+            automation=automation,
             notificationsEnabled=state.notificationsEnabled,
             instantNotifications=state.instantNotifications,
             notificationPreview=state.notificationPreview,
@@ -1102,8 +1122,9 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onRevealIndexRing=viewModel::revealIndexRingSecret,
             onRotateIndexRing=viewModel::rotateIndexRingSecret,
             onTestIndexRing=viewModel::testIndexRing,
+            onAutomation=viewModel::setAutomation,
         )
-        state.screen == "activity" -> ActivityScreen(activity, state.loading) { viewModel.showScreen("inbox") }
+        state.screen == "activity" -> ActivityScreen(activity,state.loading,{viewModel.showScreen("inbox")},viewModel::undoOperation)
         state.screen == "pending" -> PendingCapturesScreen(
             pending,state.loading,
             onBack={viewModel.showScreen("inbox")},
@@ -1850,6 +1871,7 @@ private fun StatusScreen(
     updateDownloadProgress: Int?,
     indexRingIntegration: IndexRingIntegration?,
     indexRingSecret: String?,
+    automation:AutomationSettings?,
     notificationsEnabled: Boolean,
     instantNotifications: Boolean,
     notificationPreview:Boolean,
@@ -1884,6 +1906,7 @@ private fun StatusScreen(
     onRevealIndexRing: (String) -> Unit,
     onRotateIndexRing: (String) -> Unit,
     onTestIndexRing: () -> Unit,
+    onAutomation:(Boolean)->Unit,
 ) {
     var retentionDialog by remember { mutableStateOf(false) }
     var days by remember { mutableStateOf("30") }
@@ -1944,6 +1967,16 @@ private fun StatusScreen(
                     FilterChip(selected=themeMode==mode,onClick={onThemeMode(mode)},label={Text(label)})
                 }
             }
+            HorizontalDivider()
+            Text("Capture automation",fontWeight=FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Automatically execute safe commands")
+                    Text(automation?.safety?:"Loading server policy…",style=MaterialTheme.typography.labelSmall)
+                }
+                Switch(checked=automation?.enabled==true,onCheckedChange=onAutomation,enabled=automation!=null&&!loading)
+            }
+            automation?.let { Text("Allowed: ${it.operations.joinToString { operation -> operation.replace('_',' ') }} • threshold ${"%.2f".format(it.threshold)}",style=MaterialTheme.typography.labelSmall) }
             HorizontalDivider()
             Text("Notifications",fontWeight=FontWeight.Bold)
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
@@ -2125,7 +2158,7 @@ private fun StatusScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ActivityScreen(activity: List<ActivityItem>, loading: Boolean, onBack: () -> Unit) {
+private fun ActivityScreen(activity:List<ActivityItem>,loading:Boolean,onBack:()->Unit,onUndo:(String)->Unit) {
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Recent activity") },
@@ -2139,10 +2172,17 @@ private fun ActivityScreen(activity: List<ActivityItem>, loading: Boolean, onBac
         } else {
             LazyColumn(Modifier.padding(padding)) {
                 items(activity, key = { it.id }) { item ->
+                    val details=remember(item.details){runCatching{Json.parseToJsonElement(item.details).jsonObject}.getOrNull()}
+                    val receiptId=details?.get("receiptId")?.toString()?.trim('"')
+                    val reversible=details?.get("reversible")?.toString()=="true"
+                    val reason=details?.get("reason")?.toString()?.trim('"')
+                    val confidence=details?.get("confidence")?.toString()?.toDoubleOrNull()
                     Column(Modifier.fillMaxWidth().padding(18.dp)) {
                         Text(item.kind.replace('_',' '), fontWeight = FontWeight.Bold)
                         Text(item.message)
+                        if(!reason.isNullOrBlank()) Text("Why: $reason${confidence?.let { " · confidence %.2f".format(it) } ?: ""}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(formatDate(item.createdAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if(reversible&&!receiptId.isNullOrBlank())OutlinedButton(onClick={onUndo(receiptId)},enabled=!loading){Text("Undo")}
                     }
                     HorizontalDivider()
                 }

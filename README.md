@@ -161,6 +161,14 @@ Its default capture category can be set to **Note**, **Task**, **Idea**, or **Qu
 Android new-note notifications include the saved note content when available and provide **Archive**, **Star**, **Processed**, and **Delete** quick actions. APK updates show live download progress before Android opens the installer.
 Native captures carry a stable idempotency key, so reconnecting after an ambiguous upload response cannot create a second note from the same recording.
 
+## Safe capture automation
+
+Index Inbox can automatically execute a small allowlist of high-confidence commands from unattended captures. It is disabled by default and can be enabled under **Settings → Capture automation** in either the web/PWA or Android app. The same server-owned setting applies to every client.
+
+Automatic execution requires deterministic confidence of at least `0.95` and is limited to creating a Collection, adding an Item to one uniquely matched Collection, or setting a reminder. Completion, deletion, destructive changes, ambiguous Collection matches, and low-confidence interpretations are never automatic. An unattended command that does not pass the policy is retained as a plain Item instead of being discarded or guessed.
+
+Every attempted automatic interpretation produces a durable receipt in **Recent activity**, including its outcome, reason, and confidence. Reversible operations offer **Undo** there. Stable source keys make widget retries and offline-queue delivery idempotent, including audio transcription retries.
+
 ## Local authentication setup
 
 Local mode keeps account credentials and sessions in the same SQLite database as Index Inbox. It does not load Firebase or contact Google. There is no public registration or web-based password reset.

@@ -47,4 +47,18 @@ class InterpretationContractTest {
         assertEquals("Needs correction",interpretationConfidenceLabel(ambiguous))
         assertEquals("confirm",ManualCapture("Complete milk",interpretationAction="confirm").interpretationAction)
     }
+
+    @Test
+    fun automationPolicyAndOfflineActionDecodeForNativeClients() {
+        val settings=Json.decodeFromString<AutomationSettings>("""{
+          "enabled":true,"threshold":0.95,
+          "operations":["create_collection","add_to_collection","set_reminder"],
+          "safety":"Only deterministic, non-destructive, single-match operations can run automatically."
+        }""")
+        assertTrue(settings.enabled)
+        assertEquals(0.95,settings.threshold,0.0)
+        assertFalse(settings.operations.contains("complete_item"))
+        val queued=PendingCapture("id","","Create List","note",null,1L,"","auto")
+        assertEquals("auto",queued.interpretationAction)
+    }
 }

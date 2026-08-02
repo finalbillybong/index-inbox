@@ -90,6 +90,9 @@ data class InterpretationResult(
     val explanation: String,
     val ambiguous: Boolean,
     val requiresConfirmation: Boolean,
+    val autoExecutable:Boolean = false,
+    val autoExecutionReason:String = "",
+    val autoExecutionEnabled:Boolean = false,
 )
 
 @Serializable
@@ -239,3 +242,14 @@ data class AndroidUpdate(
     val bytes: Long = 0,
     val sha256: String = "",
 )
+
+@Serializable
+data class AutomationSettings(
+    val enabled:Boolean,
+    val threshold:Double,
+    val operations:List<String>,
+    val safety:String,
+)
+
+@Serializable data class AutomationUpdate(val enabled:Boolean)
+@Serializable data class UndoOperationResult(val ok:Boolean,val receiptId:String,val status:String)
