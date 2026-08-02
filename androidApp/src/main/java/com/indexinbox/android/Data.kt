@@ -54,6 +54,7 @@ data class PendingCapture(
     val audioPath: String? = null,
     val createdAt: Long,
     val lastError: String = "",
+    val interpretationAction: String? = null,
 )
 
 @Dao
@@ -71,7 +72,7 @@ interface PendingCaptureDao {
     suspend fun delete(id: String)
 }
 
-@Database(entities = [Entry::class,PendingCapture::class], version = 5, exportSchema = false)
+@Database(entities = [Entry::class,PendingCapture::class], version = 6, exportSchema = false)
 abstract class IndexDatabase : RoomDatabase() {
     abstract fun entries(): EntryDao
     abstract fun pending(): PendingCaptureDao
@@ -80,7 +81,7 @@ abstract class IndexDatabase : RoomDatabase() {
         @Volatile private var instance: IndexDatabase? = null
         fun get(context: Context): IndexDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, IndexDatabase::class.java, "index-inbox.db")
-                .addMigrations(MIGRATION_1_2,MIGRATION_2_3,MIGRATION_3_4,MIGRATION_4_5)
+                .addMigrations(MIGRATION_1_2,MIGRATION_2_3,MIGRATION_3_4,MIGRATION_4_5,MIGRATION_5_6)
                 .build().also { instance = it }
         }
         private val MIGRATION_1_2=object:Migration(1,2) {
@@ -111,6 +112,11 @@ abstract class IndexDatabase : RoomDatabase() {
             override fun migrate(db:SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE entries ADD COLUMN completed INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE entries ADD COLUMN collectionName TEXT")
+            }
+        }
+        private val MIGRATION_5_6=object:Migration(5,6) {
+            override fun migrate(db:SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE pending_captures ADD COLUMN interpretationAction TEXT")
             }
         }
     }

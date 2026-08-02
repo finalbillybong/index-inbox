@@ -127,7 +127,9 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 
 ## Browser audio capture and local transcription
 
-The **Capture → Record audio** control records in a browser-supported Opus format, uploads the recording through the authenticated application API, and transcribes it on the Index Inbox server with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). The generated text is shown in the capture form for editing before the note is saved. The recording is stored alongside the note when you press **Save**.
+The **Capture → Record audio** control records in a browser-supported Opus format, uploads the recording through the authenticated application API, and transcribes it on the Index Inbox server with [faster-whisper](https://github.com/SYSTRAN/faster-whisper). The generated text is shown in the capture form for editing and interpretation before the Item is saved. The recording is stored alongside the Item when you press **Save to inbox**.
+
+Text and audio captures show the operation Index Inbox proposes. Ambiguous captures can be corrected and re-interpreted or deliberately saved as a plain Item; consequential operations require confirmation. Web/PWA and Android use the same wording and safety states. See [Phase 5 capture preview and confirmation](docs/phase-5-capture-preview.md).
 
 The default `tiny.en` model is intended for short English notes and runs on a CPU using INT8 inference. No GPU is required. The first transcription downloads the model into `INDEX_DATA_PATH/models`; later transcriptions reuse that local copy. Choose `base.en` or `small.en` with `TRANSCRIPTION_MODEL` for potentially better accuracy at the cost of more memory and slower CPU transcription.
 
@@ -243,7 +245,7 @@ keyPassword=your-key-password
 
 Build the signed artifact with `./gradlew :androidApp:assembleRelease`. Back up the keystore and its passwords: Android will not accept future updates signed with a replacement key.
 
-The Android app records AAC audio notes and uploads a temporary copy to `/api/transcribe` as soon as recording stops. The editable transcription is shown before the user commits the note. Saving uploads the reviewed text and original recording together to `/api/manual`.
+The Android app records AAC audio Items and uploads a temporary copy to `/api/transcribe` as soon as recording stops. The editable transcription and proposed operation are shown before the user commits the Item. Saving uploads the reviewed text, selected interpretation action, and original recording together to `/api/manual`.
 
 For fully self-hosted instant notifications, the signed-in app runs a visible foreground messaging service and holds an authenticated long-poll request to `/api/changes/wait`. Android displays a permanent **Index Inbox connected** notification while this connection is active. New capture and failure events normally arrive within a second of being written by the server. WorkManager polling remains as a battery-managed fallback if Android interrupts the live service.
 

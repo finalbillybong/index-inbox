@@ -57,7 +57,7 @@ class PendingCaptureWorker(context: Context,params: WorkerParameters):CoroutineW
 suspend fun uploadPendingCapture(api: IndexApi,capture: PendingCapture) {
     val audio=capture.audioPath?.let(::File)?.takeIf(File::exists)
     if(audio==null) {
-        api.capture(ManualCapture(capture.transcription,capture.title,capture.category,capture.createdAt,capture.id))
+        api.capture(ManualCapture(capture.transcription,capture.title,capture.category,capture.createdAt,capture.id,capture.interpretationAction))
         return
     }
     val plain="text/plain".toMediaType()
@@ -68,5 +68,6 @@ suspend fun uploadPendingCapture(api: IndexApi,capture: PendingCapture) {
         capture.category.toRequestBody(plain),
         capture.createdAt.toString().toRequestBody(plain),
         capture.id.toRequestBody(plain),
+        (capture.interpretationAction?:"").toRequestBody(plain),
     )
 }
