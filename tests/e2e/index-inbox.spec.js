@@ -39,7 +39,10 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.5.0');
+    await expect(page.locator('.version')).toHaveText('v1.6.0');
+    await openMenu(page, '#status-open');
+    await page.locator('#automatic-execution').check();
+    await page.keyboard.press('Escape');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
@@ -311,6 +314,20 @@ test.describe('Index Inbox browser flows', () => {
     await operation.getByRole('button',{name:'Undo'}).click();
     await expect(page.locator('.activity-row').filter({hasText:'Undid create collection'}).first()).toBeVisible();
     await expect(page.locator('.activity-row').filter({hasText:'Create collection: executed'}).first().getByRole('button',{name:'Undo'})).toBeHidden();
+  });
+
+  test('Ring completion is deferred until it is confirmed from Recent activity', async ({ page, request }) => {
+    await login(page);
+    await webhook(request, 'Task browser Ring completion target unique');
+    await webhook(request, 'Complete browser Ring completion target unique');
+    await openMenu(page, '#activity-open');
+    const pending = page.locator('.activity-row').filter({ hasText: 'Ring command needs confirmation' }).first();
+    await expect(pending.getByRole('button', { name: 'Confirm operation' })).toBeVisible();
+    await pending.getByRole('button', { name: 'Confirm operation' }).click();
+    await expect(pending.getByRole('button', { name: 'Confirm operation' })).toBeHidden();
+    await page.locator('#screen-back').click();
+    const target = page.locator('.entry-card').filter({ hasText: 'browser Ring completion target unique' }).first();
+    await expect(target.locator('input.completed')).toBeChecked();
   });
 
   test('mobile Back closes capture before leaving the inbox', async ({ page }) => {

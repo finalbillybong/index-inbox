@@ -46,6 +46,7 @@ class LocalAuthTests(unittest.TestCase):
             self.module.db().execute("DELETE FROM login_attempts")
             self.module.db().execute("DELETE FROM app_settings")
             self.module.db().commit()
+            self.module.set_setting_bool("automatic_execution",True)
         self.client.delete_cookie("index_session")
 
     def login(self):
@@ -432,7 +433,7 @@ class LocalAuthTests(unittest.TestCase):
         feed=self.client.get(f"/api/changes?since={initial}")
         self.assertEqual(feed.status_code,200)
         kinds=[event["kind"] for event in feed.json["events"]]
-        self.assertEqual(kinds,["group_created","capture_grouped","capture_standalone"])
+        self.assertEqual(kinds,["interpreted_operation","interpreted_operation","capture_standalone"])
         capture_events=[event for event in feed.json["events"] if event["kind"].startswith("capture_")]
         self.assertTrue(all(event["details"] for event in capture_events))
         with self.module.app.app_context():
@@ -485,7 +486,7 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(unmatched.status_code,201)
         self.assertIsNone(unmatched.json["group"])
         events=self.client.get(f"/api/changes?since={initial}").json["events"]
-        self.assertEqual([event["kind"] for event in events],["group_created","group_exists","group_unrecognized"])
+        self.assertEqual([event["kind"] for event in events],["interpreted_operation","interpreted_operation","interpreted_operation"])
 
     def test_change_feed_reports_rejected_webhook(self):
         self.login(); initial=self.client.get("/api/changes").json["sequence"]
@@ -592,6 +593,7 @@ class LocalAuthTests(unittest.TestCase):
 
     def test_safe_automation_setting_policy_receipts_idempotency_and_undo(self):
         login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        with self.module.app.app_context():self.module.set_setting_bool("automatic_execution",False)
         initial=self.client.get("/api/automation",headers=headers)
         self.assertEqual(initial.status_code,200);self.assertFalse(initial.json["enabled"])
         self.assertEqual(initial.json["threshold"],0.95)
@@ -633,6 +635,40 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(completion.json["operationOutcome"],"saved_plain_safely")
         self.assertEqual(ambiguous.json["operationOutcome"],"saved_plain_safely")
         with self.module.app.app_context():self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='never-auto-complete'").fetchone()[0],0)
+
+    def test_index_ring_uses_safe_policy_and_defers_completion_for_review(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret","X-Index-Trigger":"double-click-hold"}
+        with self.module.app.app_context():
+            self.module.db().execute("INSERT INTO entries(id,created_at,transcription,payload_json,title,category) VALUES(?,?,?,?,?,?)",("ring-target",self.module.now(),"prepare espresso phase seven","{}","Ring espresso phase seven","task"));self.module.db().commit()
+        response=self.client.post("/webhook/index",data={"transcription":"Complete Ring espresso phase seven","recordedAt":"1785686400000","client":"ring"},headers=webhook)
+        self.assertEqual(response.status_code,201);self.assertEqual(response.json["operationOutcome"],"awaiting_confirmation")
+        with self.module.app.app_context():
+            self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='ring-target'").fetchone()[0],0)
+            command=self.module.db().execute("SELECT payload_json FROM entries WHERE id=?",(response.json["id"],)).fetchone()
+            self.assertEqual(json.loads(command["payload_json"])["indexTrigger"],"double-click-hold")
+        login=self.login();activity=self.client.get("/api/activity").json
+        receipt=next(row for row in activity if response.json["operationReceiptId"] in row["details"])
+        details=json.loads(receipt["details"]);self.assertEqual(details["source"],"ring");self.assertEqual(details["targetId"],response.json["id"])
+        self.assertTrue(details["confirmable"]);self.assertIn("needs confirmation",receipt["message"].lower())
+        headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        confirmed=self.client.post(f"/api/operations/{response.json['operationReceiptId']}/confirm",headers=headers)
+        self.assertEqual(confirmed.status_code,200);self.assertEqual(confirmed.json["targetId"],"ring-target")
+        with self.module.app.app_context():
+            target=self.module.db().execute("SELECT completed FROM entries WHERE id='ring-target'").fetchone();command=self.module.db().execute("SELECT archived FROM entries WHERE id=?",(response.json["id"],)).fetchone()
+            self.assertEqual((target["completed"],command["archived"]),(1,1))
+        self.assertEqual(self.client.post(f"/api/operations/{response.json['operationReceiptId']}/confirm",headers=headers).status_code,409)
+        self.assertEqual(self.client.post(f"/api/operations/{response.json['operationReceiptId']}/undo",headers=headers).status_code,200)
+        with self.module.app.app_context():self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='ring-target'").fetchone()[0],0)
+
+    def test_index_ring_audio_filename_is_a_stable_retry_key_and_payload_metadata_is_preserved(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret","X-Index-Trigger":"single-click-hold"}
+        def send(content):
+            return self.client.post("/webhook/index",data={"transcription":"Note retry-safe Ring audio","recordedAt":"1785686400000","client":"ring","audio":(io.BytesIO(content),"ring-recording-42.m4a","audio/mp4")},headers=webhook)
+        first=send(b"first audio bytes");second=send(b"different retry bytes")
+        self.assertEqual(first.status_code,201);self.assertEqual(second.status_code,200);self.assertTrue(second.json["duplicate"]);self.assertEqual(second.json["id"],first.json["id"])
+        with self.module.app.app_context():
+            rows=self.module.db().execute("SELECT payload_json FROM entries WHERE id=?",(first.json["id"],)).fetchall();self.assertEqual(len(rows),1)
+            payload=json.loads(rows[0]["payload_json"]);self.assertEqual(payload["recordingId"],"ring-recording-42");self.assertEqual(payload["indexTrigger"],"single-click-hold")
 
     def test_natural_spoken_number_group_aliases(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}
@@ -805,7 +841,7 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code,200)
         self.assertTrue(duplicate.json["duplicate"])
         events=self.client.get("/api/activity").json
-        self.assertTrue(any(event["kind"]=="capture_grouped" and event["details"]==entry_id for event in events))
+        self.assertTrue(any(event["kind"]=="interpreted_operation" and json.loads(event["details"]).get("targetId")==entry_id for event in events))
 
     def test_item_completion_and_collection_api_are_additive(self):
         webhook={"X-Webhook-Secret":"test-webhook-secret"}
@@ -853,6 +889,9 @@ class LocalAuthTests(unittest.TestCase):
                 reminder_completed INTEGER NOT NULL DEFAULT 0,reminder_notify_before_minutes INTEGER);
               CREATE TABLE note_groups (name TEXT PRIMARY KEY COLLATE NOCASE,display_name TEXT NOT NULL,
                 created_at TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0);
+              CREATE TABLE interpreted_operations (id TEXT PRIMARY KEY,created_at TEXT NOT NULL,source TEXT NOT NULL,
+                source_key TEXT UNIQUE,operation TEXT NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,
+                target_id TEXT,result_json TEXT NOT NULL,undo_kind TEXT,undo_payload TEXT,reversed_at TEXT);
             """)
             values=("legacy-1","2026-01-01T10:00:00Z","2026-01-01T09:59:00Z","legacy text","ring","legacy.webm","audio/webm",'{"legacy":true}',1,1,"old","Legacy","task",0,"stable-source","LEGACY7","2026-01-02T08:00:00Z",1,30)
             connection.execute("INSERT INTO entries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",values)
@@ -865,6 +904,7 @@ class LocalAuthTests(unittest.TestCase):
             row=migrated.execute("SELECT * FROM entries WHERE id='legacy-1'").fetchone()
             self.assertEqual(tuple(row[key] for key in ("id","created_at","recorded_at","audio_path","group_name","due_at","reminder_completed","processed")),("legacy-1","2026-01-01T10:00:00Z","2026-01-01T09:59:00Z","legacy.webm","LEGACY7","2026-01-02T08:00:00Z",1,1))
             self.assertEqual(row["completed"],0)
+            self.assertIn("proposed_json",{column[1] for column in migrated.execute("PRAGMA table_info(interpreted_operations)")})
             self.assertEqual(migrated.execute("PRAGMA user_version").fetchone()[0],2)
             legacy_reader=migrated.execute("SELECT id,group_name,due_at,processed,reminder_completed FROM entries").fetchone()
             self.assertEqual(tuple(legacy_reader),("legacy-1","LEGACY7","2026-01-02T08:00:00Z",1,1))

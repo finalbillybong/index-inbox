@@ -4,6 +4,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class NotificationAndDownloadTest {
+    @Test fun ringOperationOutcomesUseClearNotificationTitles() {
+        assertEquals("Ring command needs confirmation",ringOperationNotificationTitle("awaiting_confirmation"))
+        assertEquals("Ring command needs review",ringOperationNotificationTitle("saved_plain_safely"))
+        assertEquals("Ring command completed",ringOperationNotificationTitle("executed"))
+    }
     private fun entry(transcription:String="",audioPath:String?=null)=Entry(
         id="entry-1",
         createdAt="2026-07-29T20:00:00Z",

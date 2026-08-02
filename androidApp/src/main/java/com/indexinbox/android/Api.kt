@@ -93,6 +93,9 @@ interface IndexApi {
     @POST("api/operations/{id}/undo")
     suspend fun undoOperation(@Path("id") id:String):UndoOperationResult
 
+    @POST("api/operations/{id}/confirm")
+    suspend fun confirmOperation(@Path("id") id:String):UndoOperationResult
+
     @GET("api/collections/{name}/timeline")
     suspend fun groupTimeline(@Path("name") name: String): GroupTimeline
 

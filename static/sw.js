@@ -1,5 +1,5 @@
-const STATIC='index-static-v34';
-const ASSETS=['/','/style.css?v=34','/app.js?v=34','/manifest.webmanifest?v=34','/icon.svg'];
+const STATIC='index-static-v35';
+const ASSETS=['/','/style.css?v=35','/app.js?v=35','/manifest.webmanifest?v=35','/icon.svg'];
 self.addEventListener('install',event=>{self.skipWaiting();event.waitUntil(caches.open(STATIC).then(cache=>cache.addAll(ASSETS)))});
 self.addEventListener('activate',event=>{event.waitUntil(Promise.all([self.clients.claim(),caches.keys().then(keys=>Promise.all(keys.filter(key=>(key.startsWith('index-static-')&&key!==STATIC)||key==='index-data').map(key=>caches.delete(key))))]))});
 self.addEventListener('fetch',event=>{if(event.request.method!=='GET')return;const url=new URL(event.request.url);if(url.origin!==location.origin||url.pathname.startsWith('/api/')||url.pathname.startsWith('/auth/')||url.pathname==='/config.js')return;event.respondWith(fetch(event.request).then(response=>{if(response.ok)caches.open(STATIC).then(cache=>cache.put(event.request,response.clone()));return response}).catch(()=>caches.match(event.request).then(response=>response||caches.match('/'))))});
