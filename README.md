@@ -170,6 +170,8 @@ Index Inbox can automatically execute a small allowlist of high-confidence comma
 
 Automatic execution requires deterministic confidence of at least `0.95` and is limited to creating a Collection, adding an Item to one uniquely matched Collection, or setting a reminder. Completion, deletion, destructive changes, ambiguous Collection matches, and low-confidence interpretations are never automatic. An unattended command that does not pass the policy is retained as a plain Item instead of being discarded or guessed.
 
+Natural list commands can use forms such as `Add milk to my shopping list` or `Add bread to the shopping collection`, provided the named Collection or one of its aliases already exists. Reviewed captures using `accept` execute the proposal directly; unattended captures using `auto` require Capture automation to be enabled.
+
 Every attempted automatic interpretation produces a durable receipt in **Recent activity**, including its outcome, reason, and confidence. Reversible operations offer **Undo** there. Stable source keys make widget retries and offline-queue delivery idempotent, including audio transcription retries.
 
 ## Optional self-hosted interpretation model
