@@ -566,6 +566,31 @@ class LocalAuthTests(unittest.TestCase):
         login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
         self.assertEqual(self.client.post("/api/interpret",json={"text":"Find milk","referenceAt":"not-a-date"},headers=headers).status_code,400)
 
+    def test_optional_self_hosted_model_is_validated_confirmed_and_falls_back_safely(self):
+        login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        previous=(self.module.INTERPRETATION_MODEL_URL,self.module.INTERPRETATION_MODEL_NAME)
+        self.module.INTERPRETATION_MODEL_URL="http://ollama:11434";self.module.INTERPRETATION_MODEL_NAME="test-model:4b"
+        with self.module.app.app_context():
+            self.module.db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES('SHOPPING','SHOPPING',?)",(self.module.now(),));self.module.db().commit()
+        valid=json.dumps({"message":{"content":json.dumps({"operation":"add_to_collection","collectionName":"SHOPPING","text":"milk","explanation":"The user asked to put milk on the shopping list."})}}).encode()
+        tags=json.dumps({"models":[{"name":"test-model:4b"}]}).encode()
+        def local_model(request_value,timeout=None):
+            url=request_value.full_url if hasattr(request_value,"full_url") else str(request_value)
+            return io.BytesIO(tags if url.endswith("/api/tags") else valid)
+        try:
+            self.assertTrue(self.client.patch("/api/model",json={"enabled":True},headers=headers).json["enabled"])
+            with patch.object(self.module.urllib.request,"urlopen",side_effect=local_model):
+                self.assertEqual(self.client.post("/api/model/test",headers=headers).status_code,200)
+                proposal=self.client.post("/api/interpret",json={"text":"Could you put milk on my shopping list?"},headers=headers)
+            self.assertEqual(proposal.json["interpretationSource"],"model",self.client.get("/api/model",headers=headers).json);self.assertEqual(proposal.json["operation"],"add_to_collection")
+            self.assertTrue(proposal.json["requiresConfirmation"]);self.assertEqual(proposal.json["confidence"],0.7)
+            no_match=io.BytesIO(json.dumps({"message":{"content":json.dumps({"operation":"no_match","explanation":"private raw model output"})}}).encode())
+            with patch.object(self.module.urllib.request,"urlopen",return_value=no_match):
+                fallback=self.client.post("/api/interpret",json={"text":"Could you put bread somewhere useful?"},headers=headers)
+            self.assertEqual(fallback.json["interpretationSource"],"deterministic_fallback");self.assertEqual(fallback.json["operation"],"create_item")
+            status=self.client.get("/api/model",headers=headers).json;self.assertEqual(status["state"],"unavailable");self.assertNotIn("private raw model output",status["message"])
+        finally:self.module.INTERPRETATION_MODEL_URL,self.module.INTERPRETATION_MODEL_NAME=previous
+
     def test_manual_preview_requires_completion_confirmation_and_supports_plain_override(self):
         login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
         with self.module.app.app_context():

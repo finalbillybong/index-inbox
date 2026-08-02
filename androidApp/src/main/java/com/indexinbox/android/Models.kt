@@ -252,4 +252,15 @@ data class AutomationSettings(
 )
 
 @Serializable data class AutomationUpdate(val enabled:Boolean)
+@Serializable data class InterpretationModelSettings(
+    val enabled:Boolean=false,
+    val configured:Boolean=false,
+    val name:String="",
+    val url:String="",
+    val timeoutSeconds:Int=8,
+    val state:String="not_checked",
+    val message:String="",
+    val checkedAt:String?=null,
+)
+@Serializable data class InterpretationModelUpdate(val enabled:Boolean)
 @Serializable data class UndoOperationResult(val ok:Boolean,val receiptId:String,val status:String)

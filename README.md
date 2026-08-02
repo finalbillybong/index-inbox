@@ -122,6 +122,9 @@ The host exposes port `5050`; the container listens on port `8080`. Point a reve
 | `TRANSCRIPTION_MODEL` | No | faster-whisper model name; defaults to `tiny.en` |
 | `TRANSCRIPTION_LANGUAGE` | No | Language code used for transcription; defaults to `en`, or leave empty for detection |
 | `TRANSCRIPTION_THREADS` | No | CPU threads available to the transcription model; defaults to `4` |
+| `INTERPRETATION_MODEL_URL` | No | Local Ollama endpoint, for example `http://interpretation-model:11434` |
+| `INTERPRETATION_MODEL_NAME` | No | Explicitly installed Ollama model name; no default and no automatic download |
+| `INTERPRETATION_MODEL_TIMEOUT` | No | Hard fallback timeout in seconds, constrained to 1–30; defaults to `8` |
 
 `FIREBASE_API_KEY` is browser configuration and is not treated as a server secret. The service-account JSON is sensitive and must never be committed, placed in the web root or included in a container image.
 
@@ -168,6 +171,21 @@ Index Inbox can automatically execute a small allowlist of high-confidence comma
 Automatic execution requires deterministic confidence of at least `0.95` and is limited to creating a Collection, adding an Item to one uniquely matched Collection, or setting a reminder. Completion, deletion, destructive changes, ambiguous Collection matches, and low-confidence interpretations are never automatic. An unattended command that does not pass the policy is retained as a plain Item instead of being discarded or guessed.
 
 Every attempted automatic interpretation produces a durable receipt in **Recent activity**, including its outcome, reason, and confidence. Reversible operations offer **Undo** there. Stable source keys make widget retries and offline-queue delivery idempotent, including audio transcription retries.
+
+## Optional self-hosted interpretation model
+
+The deterministic parser remains the default and is sufficient for direct commands. An optional local model can propose a non-destructive Collection, reminder, or search operation for phrasing the parser would otherwise retain as a plain Item. Model output is untrusted: Index Inbox validates it against the existing interpretation contract and current database, assigns confidence `0.70`, and always requires confirmation. It cannot enter the automatic-execution allowlist, and completion remains deterministic-only so a model cannot select an existing Item. Invalid JSON, unknown Collections, past reminders, timeouts, and unavailable runtimes fall back to the deterministic result.
+
+The Compose model profile uses Ollama with cloud features disabled. It is never started or downloaded during a normal installation:
+
+```bash
+printf '\nINTERPRETATION_MODEL_URL=http://interpretation-model:11434\nINTERPRETATION_MODEL_NAME=qwen3:4b\nINTERPRETATION_MODEL_TIMEOUT=8\n' >> .env
+docker compose --profile model up -d
+docker exec index-inbox-model ollama pull qwen3:4b
+docker compose up -d --force-recreate index-inbox
+```
+
+Then open **Settings → Self-hosted interpretation model**, test the connection, and enable it. The same status and controls appear in web/PWA and Android. A quantized 4B model is the practical CPU-oriented starting point; allow roughly 8 GB of free system memory, more for larger models and concurrent transcription. Model downloads require substantial storage and initial internet access, but local inference does not send captures to Ollama's cloud. See Ollama's [structured-output](https://docs.ollama.com/capabilities/structured-outputs), [local-only](https://docs.ollama.com/faq#how-do-i-disable-ollamas-cloud-features), and [hardware](https://docs.ollama.com/gpu) documentation.
 
 ## Local authentication setup
 

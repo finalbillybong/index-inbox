@@ -39,7 +39,7 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.6.0');
+    await expect(page.locator('.version')).toHaveText('v1.7.0');
     await openMenu(page, '#status-open');
     await page.locator('#automatic-execution').check();
     await page.keyboard.press('Escape');
@@ -290,13 +290,15 @@ test.describe('Index Inbox browser flows', () => {
     await expect(page.locator('header')).toHaveCSS('min-height', '64px');
     await openMenu(page, '#status-open');
     await expect(page.locator('.settings-screen')).toBeVisible();
-    await expect(page.locator('.settings-section h3')).toHaveText(['Appearance','Capture automation','Notifications','Server & transcription','Index Ring integration','Verified backups','Export all Items','Maintenance']);
+    await expect(page.locator('.settings-section h3')).toHaveText(['Appearance','Capture automation','Self-hosted interpretation model','Notifications','Server & transcription','Index Ring integration','Verified backups','Export all Items','Maintenance']);
     await page.locator('#automatic-execution').check();
     await expect(page.locator('#automatic-execution')).toBeChecked();
+    await expect(page.locator('#model-enabled')).toBeDisabled();
+    await expect(page.locator('#model-test')).toBeDisabled();
     await page.locator('#theme-mode').selectOption('light');
     await expect(page.locator('html')).toHaveAttribute('data-theme','light');
     const buttons = page.locator('.settings-screen button');
-    await expect(buttons).toHaveCount(9);
+    await expect(buttons).toHaveCount(10);
     const boxes = await buttons.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect()).map(({ top, bottom, left, right }) => ({ top, bottom, left, right })));
     for (let i = 1; i < boxes.length; i += 1) expect(boxes[i].top).toBeGreaterThanOrEqual(boxes[i - 1].bottom);
   });

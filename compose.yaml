@@ -29,9 +29,25 @@ services:
       TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-tiny.en}
       TRANSCRIPTION_LANGUAGE: ${TRANSCRIPTION_LANGUAGE:-en}
       TRANSCRIPTION_THREADS: ${TRANSCRIPTION_THREADS:-4}
+      INTERPRETATION_MODEL_URL: ${INTERPRETATION_MODEL_URL:-}
+      INTERPRETATION_MODEL_NAME: ${INTERPRETATION_MODEL_NAME:-}
+      INTERPRETATION_MODEL_TIMEOUT: ${INTERPRETATION_MODEL_TIMEOUT:-8}
       REMINDER_TIMEZONE: ${REMINDER_TIMEZONE:-UTC}
       REMINDER_CLOCK_FORMAT: ${REMINDER_CLOCK_FORMAT:-24}
       BACKUP_HOOK_URL: ${BACKUP_HOOK_URL:-}
     volumes:
       - ${INDEX_DATA_PATH}:/data
       - ${FIREBASE_CREDENTIALS_PATH:-/dev/null}:/run/secrets/firebase-service-account.json:ro
+
+  interpretation-model:
+    image: ollama/ollama:latest
+    container_name: index-inbox-model
+    profiles: ["model"]
+    restart: unless-stopped
+    environment:
+      OLLAMA_NO_CLOUD: "1"
+    volumes:
+      - index-inbox-models:/root/.ollama
+
+volumes:
+  index-inbox-models:

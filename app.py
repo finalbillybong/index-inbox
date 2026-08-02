@@ -45,6 +45,9 @@ TRANSCRIPTION_MODEL = os.getenv("TRANSCRIPTION_MODEL", "tiny.en").strip()
 TRANSCRIPTION_LANGUAGE = os.getenv("TRANSCRIPTION_LANGUAGE", "en").strip() or None
 TRANSCRIPTION_THREADS = max(int(os.getenv("TRANSCRIPTION_THREADS", "4")), 1)
 TRANSCRIPTION_MODEL_DIR = DATA_DIR / "models"
+INTERPRETATION_MODEL_URL = os.getenv("INTERPRETATION_MODEL_URL", "").strip().rstrip("/")
+INTERPRETATION_MODEL_NAME = os.getenv("INTERPRETATION_MODEL_NAME", "").strip()
+INTERPRETATION_MODEL_TIMEOUT = max(1,min(int(os.getenv("INTERPRETATION_MODEL_TIMEOUT", "8")),30))
 REMINDER_TIMEZONE = os.getenv("REMINDER_TIMEZONE", "UTC").strip() or "UTC"
 REMINDER_CLOCK_FORMAT = os.getenv("REMINDER_CLOCK_FORMAT", "24").strip()
 if REMINDER_CLOCK_FORMAT not in {"12","24"}:raise RuntimeError("REMINDER_CLOCK_FORMAT must be 12 or 24")
@@ -52,6 +55,8 @@ try:REMINDER_ZONE=ZoneInfo(REMINDER_TIMEZONE)
 except ZoneInfoNotFoundError as error:raise RuntimeError(f"Unknown REMINDER_TIMEZONE: {REMINDER_TIMEZONE}") from error
 _TRANSCRIPTION_MODEL = None
 _TRANSCRIPTION_LOCK = threading.Lock()
+_INTERPRETATION_MODEL_STATUS={"state":"not_checked","message":"The model has not been called.","checkedAt":None}
+_INTERPRETATION_MODEL_LOCK=threading.Lock()
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
 CAPTURE_EVENT_KINDS = {"capture_standalone", "capture_grouped", "group_created", "group_exists",
   "group_unrecognized", "webhook_rejected", "ingest_error", "item_completed", "item_reopened",
@@ -538,7 +543,7 @@ def completion_candidates(query):
       AND (title LIKE ? OR transcription LIKE ?) ORDER BY created_at DESC LIMIT 10""",(f"%{query}%",f"%{query}%")).fetchall()
     return [{"id":row["id"],"label":row["title"] or row["transcription"][:120]} for row in rows]
 
-def interpret_capture(text,reference=None,requested_collection=""):
+def interpret_capture_deterministic(text,reference=None,requested_collection=""):
     text=str(text or "").strip()
     if not text:return interpretation_result("create_item",{"text":""},0.0,"The capture is empty.",True,True)
     command=create_group_command(text)
@@ -576,6 +581,63 @@ def interpret_capture(text,reference=None,requested_collection=""):
     if group_name:
         return interpretation_result("add_to_collection",{"text":group_text,"collectionName":group_name},0.99,f"Add an Item to Collection {group_name}.")
     return interpretation_result("create_item",{"text":text},1.0,"Create a standalone Item.")
+
+MODEL_OPERATIONS={"create_collection","add_to_collection","set_reminder","search_items"}
+MODEL_OUTPUT_OPERATIONS=MODEL_OPERATIONS|{"no_match"}
+
+def interpretation_model_configured():return bool(INTERPRETATION_MODEL_URL and INTERPRETATION_MODEL_NAME)
+
+def set_interpretation_model_status(state,message):
+    global _INTERPRETATION_MODEL_STATUS
+    _INTERPRETATION_MODEL_STATUS={"state":state,"message":str(message)[:240],"checkedAt":now()}
+
+def validate_model_proposal(value,text,reference):
+    if not isinstance(value,dict) or value.get("operation") not in MODEL_OPERATIONS:raise ValueError("The model returned an unsupported operation")
+    operation=value["operation"]
+    explanation=f"Self-hosted model proposal: {str(value.get('explanation') or operation).strip()[:180]}"
+    if operation=="create_collection":
+        name=normalized_group_name(value.get("name",""))
+        if not name:raise ValueError("The model proposed an invalid Collection name")
+        return interpretation_result(operation,{"name":name,"aliases":[name.lower()]},0.7,explanation,False,True)
+    if operation=="add_to_collection":
+        group=find_group(value.get("collectionName",""));item_text=str(value.get("text") or text).strip()
+        if not group or not item_text:raise ValueError("The model did not identify one existing Collection")
+        return interpretation_result(operation,{"text":item_text,"collectionName":group["name"]},0.7,explanation,False,True)
+    if operation=="set_reminder":
+        due=normalize_timestamp(value.get("dueAt"));item_text=str(value.get("text") or text).strip()
+        if not due or datetime.fromisoformat(due.replace("Z","+00:00"))<=datetime.now(timezone.utc):raise ValueError("The model proposed an invalid or past reminder time")
+        arguments={"text":item_text,"dueAt":due,"notifyBeforeMinutes":None}
+        if value.get("collectionName"):
+            group=find_group(value["collectionName"])
+            if not group:raise ValueError("The model proposed an unknown Collection")
+            arguments["collectionName"]=group["name"]
+        return interpretation_result(operation,arguments,0.7,explanation,False,True)
+    query=str(value.get("query") or "").strip()
+    if not query:raise ValueError("The model search proposal had no query")
+    return interpretation_result("search_items",{"query":query},0.7,explanation,False,True)
+
+def model_interpret_capture(text,reference):
+    collections=[row[0] for row in db().execute("SELECT display_name FROM note_groups WHERE archived=0 ORDER BY display_name LIMIT 100")]
+    schema={"type":"object","properties":{"operation":{"type":"string","enum":sorted(MODEL_OUTPUT_OPERATIONS)},"text":{"type":"string"},"collectionName":{"type":"string"},"dueAt":{"type":"string"},"query":{"type":"string"},"name":{"type":"string"},"explanation":{"type":"string"}},"required":["operation","explanation"]}
+    prompt=("Classify one Index Inbox capture. Never invent a Collection or Item. Return no_match when uncertain. "
+      f"Current UTC time: {(reference or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()}. Existing Collections: {json.dumps(collections)}. Capture: {json.dumps(text)}")
+    body=json.dumps({"model":INTERPRETATION_MODEL_NAME,"messages":[{"role":"system","content":"Return only the requested JSON interpretation. You propose; the application validates and confirms."},{"role":"user","content":prompt}],"stream":False,"format":schema,"options":{"temperature":0}}).encode()
+    request_value=urllib.request.Request(f"{INTERPRETATION_MODEL_URL}/api/chat",data=body,headers={"Content-Type":"application/json"},method="POST")
+    with _INTERPRETATION_MODEL_LOCK:
+        try:
+            with urllib.request.urlopen(request_value,timeout=INTERPRETATION_MODEL_TIMEOUT) as response:payload=json.loads(response.read(1024*1024))
+            content=payload.get("message",{}).get("content","");proposal=validate_model_proposal(json.loads(content),text,reference)
+            set_interpretation_model_status("available",f"{INTERPRETATION_MODEL_NAME} returned a valid proposal.");return proposal
+        except Exception as error:
+            set_interpretation_model_status("unavailable",f"Model fallback failed safely: {type(error).__name__}");return None
+
+def interpret_capture(text,reference=None,requested_collection=""):
+    deterministic=interpret_capture_deterministic(text,reference,requested_collection)
+    should_try=(setting_bool("interpretation_model_enabled",False) and interpretation_model_configured() and not requested_collection
+      and (deterministic["ambiguous"] or deterministic["operation"]=="create_item"))
+    if not should_try:return {**deterministic,"interpretationSource":"deterministic"}
+    proposed=model_interpret_capture(str(text or ""),reference)
+    return {**(proposed or deterministic),"interpretationSource":"model" if proposed else "deterministic_fallback"}
 
 def leading_group_candidate(text):
     tokens=re.sub(r"^\s*add\s+to\s+","",str(text),count=1,flags=re.IGNORECASE).strip().split()
@@ -1064,6 +1126,37 @@ def update_automation_settings():
     set_setting_bool("automatic_execution",body["enabled"])
     log_activity("info","automation_setting",f"Automatic execution {'enabled' if body['enabled'] else 'disabled'}")
     return automation_settings()
+
+def model_settings_response():
+    return jsonify(enabled=setting_bool("interpretation_model_enabled",False),configured=interpretation_model_configured(),
+      name=INTERPRETATION_MODEL_NAME,url=INTERPRETATION_MODEL_URL,timeoutSeconds=INTERPRETATION_MODEL_TIMEOUT,**_INTERPRETATION_MODEL_STATUS)
+
+@app.get("/api/model")
+@api_auth
+def interpretation_model_settings():return model_settings_response()
+
+@app.patch("/api/model")
+@api_auth
+def update_interpretation_model_settings():
+    body=request.get_json(silent=True) or {}
+    if not isinstance(body.get("enabled"),bool):return jsonify(error="enabled must be true or false"),400
+    if body["enabled"] and not interpretation_model_configured():return jsonify(error="Configure INTERPRETATION_MODEL_URL and INTERPRETATION_MODEL_NAME on the server first"),409
+    set_setting_bool("interpretation_model_enabled",body["enabled"])
+    log_activity("info","model_setting",f"Self-hosted interpretation model {'enabled' if body['enabled'] else 'disabled'}")
+    return model_settings_response()
+
+@app.post("/api/model/test")
+@api_auth
+def test_interpretation_model():
+    if not interpretation_model_configured():return jsonify(error="The self-hosted model is not configured"),409
+    try:
+        with urllib.request.urlopen(f"{INTERPRETATION_MODEL_URL}/api/tags",timeout=INTERPRETATION_MODEL_TIMEOUT) as response:payload=json.loads(response.read(1024*1024))
+        names={model.get("name") for model in payload.get("models",[]) if isinstance(model,dict)}
+        if INTERPRETATION_MODEL_NAME not in names and not any(str(name).split(":")[0]==INTERPRETATION_MODEL_NAME.split(":")[0] for name in names):raise ValueError("Configured model is not installed")
+        set_interpretation_model_status("available",f"Connected to {INTERPRETATION_MODEL_NAME}.");return model_settings_response()
+    except Exception as error:
+        set_interpretation_model_status("unavailable",f"Connection test failed: {type(error).__name__}")
+        return model_settings_response(),503
 
 @app.post("/api/operations/<receipt_id>/confirm")
 @api_auth
