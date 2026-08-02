@@ -5,6 +5,15 @@ import org.junit.Test
 
 class InboxFilterTest {
     @Test
+    fun mobileFilterPickerExposesEveryStateAndType() {
+        assertEquals(
+            listOf("active","today","reminders","all","unprocessed","incomplete","completed","starred","archived"),
+            inboxStateFilters.map{it.first},
+        )
+        assertEquals(listOf("","note","task","idea","question"),inboxTypeFilters.map{it.first})
+    }
+
+    @Test
     fun allIncludesActiveAndArchivedEntries() {
         val entries=listOf(
             Entry(id="active",createdAt="2026-01-01T00:00:00Z"),
