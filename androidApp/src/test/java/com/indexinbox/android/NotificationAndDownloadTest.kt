@@ -19,8 +19,8 @@ class NotificationAndDownloadTest {
     @Test
     fun audioNotificationExplainsPendingTranscription() {
         assertEquals(
-            "Audio note received. Transcription may still be processing.",
-            notificationBody(entry(audioPath="audio/entry-1.m4a"),"Note received"),
+            "Audio Item received. Transcription may still be processing.",
+            notificationBody(entry(audioPath="audio/entry-1.m4a"),"Item received"),
         )
     }
 

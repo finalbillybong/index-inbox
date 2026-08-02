@@ -80,14 +80,20 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#state').selectOption('reminders');
     const shortcutCard = () => page.locator('.entry-card').filter({ hasText: 'test browser shortcuts' });
     await shortcutCard().locator('.entry-summary').click();
+    const hourSaved=page.waitForResponse(response=>response.url().includes('/api/items/')&&response.request().method()==='PATCH');
     await shortcutCard().getByRole('button', { name: 'In 1 hour' }).click();
+    await hourSaved;
     await shortcutCard().locator('.entry-summary').click();
     const hourValue = await shortcutCard().locator('.due-at').inputValue();
     expect(new Date(hourValue).getTime()).toBeGreaterThan(Date.now() + 50 * 60 * 1000);
+    const tomorrowSaved=page.waitForResponse(response=>response.url().includes('/api/items/')&&response.request().method()==='PATCH');
     await shortcutCard().getByRole('button', { name: 'Tomorrow 9:00' }).click();
+    await tomorrowSaved;
     await shortcutCard().locator('.entry-summary').click();
     await expect(shortcutCard().locator('.due-at')).toHaveValue(/T09:00$/);
+    const removed=page.waitForResponse(response=>response.url().includes('/api/items/')&&response.request().method()==='PATCH');
     await shortcutCard().getByRole('button', { name: 'Remove' }).click();
+    await removed;
     await expect(shortcutCard()).toBeHidden();
   });
 
