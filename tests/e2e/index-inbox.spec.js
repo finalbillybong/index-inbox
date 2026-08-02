@@ -20,6 +20,11 @@ async function webhook(request, transcription) {
   return response.json();
 }
 
+async function openMenu(page, target) {
+  await page.locator('#menu-toggle').click();
+  await page.locator(target).click();
+}
+
 test.describe('Index Inbox browser flows', () => {
   // These tests intentionally build on one server/database lifecycle. Retrying a
   // serial group replays owner setup against an already-initialized database.
@@ -71,7 +76,7 @@ test.describe('Index Inbox browser flows', () => {
 
   test('Index Ring integration reveals the webhook secret after password confirmation', async ({ page }) => {
     await login(page);
-    await page.locator('#integrations-open').click();
+    await openMenu(page, '#integrations-open');
     await expect(page.locator('.index-ring-integration')).toContainText('X-Webhook-Secret');
     await expect(page.locator('#index-ring-url')).toHaveValue('http://127.0.0.1:5055/webhook/index');
     await page.getByRole('button', { name: 'Reveal' }).click();
@@ -86,7 +91,7 @@ test.describe('Index Inbox browser flows', () => {
     await login(page);
     await webhook(request, 'Create Browser forty two');
     await webhook(request, 'Browzer42 needs review');
-    await page.locator('#groups-open').click();
+    await openMenu(page, '#groups-open');
     await expect(page.getByRole('button', { name: 'Review suggestions (1)' })).toBeVisible();
     await page.getByRole('button', { name: 'Review suggestions (1)' }).click();
     await expect(page.locator('.suggestion-row')).toContainText('Suggested: BROWSER42');
@@ -107,7 +112,7 @@ test.describe('Index Inbox browser flows', () => {
 
   test('timeline saves to inbox and group export downloads', async ({ page }) => {
     await login(page);
-    await page.locator('#groups-open').click();
+    await openMenu(page, '#groups-open');
     const row = page.locator('.group-row').filter({ hasText: 'BROWSER43' });
     await row.getByRole('button', { name: 'Timeline' }).click();
     const transcription = page.locator('.timeline-entry textarea').filter({ hasValue: 'needs review' });
@@ -125,8 +130,8 @@ test.describe('Index Inbox browser flows', () => {
   test('mobile controls and group dialog remain usable', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page);
-    await expect(page.locator('#capture')).toBeVisible();
-    await page.locator('#groups-open').click();
+    await expect(page.locator('#nav-capture')).toBeVisible();
+    await openMenu(page, '#groups-open');
     await expect(page.locator('#info-dialog')).toBeVisible();
     await expect(page.locator('#info-dialog')).toHaveCSS('width', '390px');
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' }).getByRole('button', { name: 'Timeline' })).toBeVisible();
@@ -194,11 +199,21 @@ test.describe('Index Inbox browser flows', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page);
     await expect(page.locator('header')).toHaveCSS('min-height', '64px');
-    await page.locator('#status-open').click();
+    await openMenu(page, '#status-open');
     await expect(page.locator('.storage-status')).toBeVisible();
     const buttons = page.locator('.storage-status .modal-actions button');
     await expect(buttons).toHaveCount(8);
     const boxes = await buttons.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect()).map(({ top, bottom, left, right }) => ({ top, bottom, left, right })));
     for (let i = 1; i < boxes.length; i += 1) expect(boxes[i].top).toBeGreaterThanOrEqual(boxes[i - 1].bottom);
+  });
+
+  test('mobile Back closes capture before leaving the inbox', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await login(page);
+    await page.locator('#nav-capture').click();
+    await expect(page.locator('#capture-dialog')).toBeVisible();
+    await page.goBack();
+    await expect(page.locator('#capture-dialog')).toBeHidden();
+    await expect(page.locator('#app')).toBeVisible();
   });
 });
