@@ -497,6 +497,8 @@ docker exec -it index-inbox flask groups delete-empty
 
 ## Data and backups
 
+The server's backward-compatible Item model and Collection API aliases are documented in [`docs/phase-2-server-model.md`](docs/phase-2-server-model.md). General Item completion, inbox processing, and reminder completion are separate states. Existing Entry/Group API routes remain supported during the migration.
+
 `INDEX_DATA_PATH` contains:
 
 ```text
@@ -584,7 +586,7 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-The browser flow covers first-run setup, subsequent login, live webhook refresh, note groups, suggestion acceptance, rename/archive/reopen behavior, timeline saving, group downloads, and a narrow mobile viewport. Pull requests and pushes to `main` run the Chromium suite in GitHub Actions; failed runs upload the Playwright HTML report, traces, and screenshots for seven days.
+The browser flow covers first-run setup, subsequent login, live webhook refresh, note groups, suggestion acceptance, rename/archive/reopen behavior, timeline saving, group downloads, and a narrow mobile viewport. Pull requests and pushes to `main` run the Python server, Android unit, and Chromium suites in GitHub Actions; failed browser runs upload the Playwright HTML report, traces, and screenshots for seven days.
 
 
 

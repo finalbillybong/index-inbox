@@ -54,7 +54,8 @@ _TRANSCRIPTION_MODEL = None
 _TRANSCRIPTION_LOCK = threading.Lock()
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
 CAPTURE_EVENT_KINDS = {"capture_standalone", "capture_grouped", "group_created", "group_exists",
-  "group_unrecognized", "webhook_rejected", "ingest_error"}
+  "group_unrecognized", "webhook_rejected", "ingest_error", "item_completed", "item_reopened",
+  "collection_changed"}
 DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True); BACKUP_DIR.mkdir(parents=True,exist_ok=True); TRANSCRIPTION_MODEL_DIR.mkdir(parents=True,exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
 if AUTH_PROVIDER == "firebase" and PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
@@ -69,8 +70,8 @@ def close_db(_error):
     connection = g.pop("db", None)
     if connection is not None: connection.close()
 
-def init_db():
-    con = sqlite3.connect(DB_PATH)
+def init_db(path=DB_PATH):
+    con = sqlite3.connect(path)
     con.executescript("""
       CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, recorded_at TEXT,
         transcription TEXT NOT NULL DEFAULT '', trigger_type TEXT, audio_path TEXT, audio_mime TEXT,
@@ -101,11 +102,12 @@ def init_db():
         status TEXT NOT NULL,archive_name TEXT,archive_bytes INTEGER,error TEXT NOT NULL DEFAULT '');
       CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
     """)
+    con.execute("BEGIN IMMEDIATE")
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
     additions = {"title":"TEXT NOT NULL DEFAULT ''", "category":"TEXT NOT NULL DEFAULT 'note'",
       "archived":"INTEGER NOT NULL DEFAULT 0", "source_key":"TEXT", "group_name":"TEXT",
       "due_at":"TEXT","reminder_completed":"INTEGER NOT NULL DEFAULT 0",
-      "reminder_notify_before_minutes":"INTEGER"}
+      "reminder_notify_before_minutes":"INTEGER", "completed":"INTEGER NOT NULL DEFAULT 0"}
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
     login_columns={r[1] for r in con.execute("PRAGMA table_info(login_attempts)")}
@@ -113,6 +115,7 @@ def init_db():
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source_key ON entries(source_key) WHERE source_key IS NOT NULL")
     con.execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) SELECT lower(display_name),display_name FROM note_groups")
     con.execute("UPDATE entries SET category='note' WHERE category='action'")
+    con.execute("PRAGMA user_version=2")
     con.commit(); con.close()
 init_db()
 
@@ -559,6 +562,12 @@ def store_entry(payload, upload=None, source="ring"):
         created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created group' if created else 'Group already exists:'} {group_to_create}",group_to_create)
         return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
     group_name,transcription=match_note_group(transcription)
+    requested_collection=first(payload,("collection_name","collectionName","group_name","groupName"),"")
+    if requested_collection:
+        canonical=normalized_group_name(requested_collection)
+        collection=db().execute("SELECT display_name FROM note_groups WHERE name=? AND archived=0",(canonical,)).fetchone() if canonical else None
+        if not collection:raise ValueError("Collection not found or archived")
+        group_name=collection["display_name"]
     reminder_reference=None
     if recorded:
         try:reminder_reference=datetime.fromisoformat(str(recorded).replace("Z","+00:00"))
@@ -599,11 +608,13 @@ def ingest():
         log_activity("error","ingest_error","A webhook could not be stored",str(error)); return jsonify(error="Webhook ingestion failed"),500
 
 @app.get("/api/groups")
+@app.get("/api/collections")
 @api_auth
 def groups():return jsonify([dict(row) for row in db().execute("""SELECT g.display_name AS name,g.created_at,g.archived,count(e.id) AS entries
   FROM note_groups g LEFT JOIN entries e ON e.group_name=g.display_name GROUP BY g.name ORDER BY g.archived,g.display_name""")])
 
 @app.patch("/api/groups/<name>")
+@app.patch("/api/collections/<name>")
 @api_auth
 def update_group(name):
     current=normalized_group_name(name); body=request.get_json(force=True); connection=db()
@@ -634,6 +645,7 @@ def update_group(name):
     return jsonify(ok=True,name=target,archived=bool(archived))
 
 @app.get("/api/groups/<name>/aliases")
+@app.get("/api/collections/<name>/aliases")
 @api_auth
 def group_aliases(name):
     name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
@@ -641,6 +653,7 @@ def group_aliases(name):
     return jsonify(group=row["display_name"],aliases=[item["alias"] for item in db().execute("SELECT alias FROM note_group_aliases WHERE group_name=? ORDER BY alias",(row["display_name"],))])
 
 @app.post("/api/groups/<name>/aliases")
+@app.post("/api/collections/<name>/aliases")
 @api_auth
 def add_group_alias(name):
     name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
@@ -654,6 +667,7 @@ def add_group_alias(name):
     return jsonify(ok=True,alias=alias,created=created),(201 if created else 200)
 
 @app.delete("/api/groups/<name>/aliases")
+@app.delete("/api/collections/<name>/aliases")
 @api_auth
 def delete_group_alias(name):
     name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
@@ -666,6 +680,7 @@ def delete_group_alias(name):
     log_activity("info","group",f"Removed alias '{alias}' from {row['display_name']}",row["display_name"]); return jsonify(ok=True)
 
 @app.delete("/api/groups/<name>")
+@app.delete("/api/collections/<name>")
 @api_auth
 def delete_group(name):
     name=normalized_group_name(name); row=db().execute("SELECT display_name FROM note_groups WHERE name=?",(name,)).fetchone() if name else None
@@ -683,6 +698,7 @@ def group_entries(name):
     return [dict(row) for row in db().execute("SELECT * FROM entries WHERE group_name=? ORDER BY coalesce(recorded_at,created_at),created_at,id",(name,))]
 
 @app.get("/api/groups/<name>/timeline")
+@app.get("/api/collections/<name>/timeline")
 @api_auth
 def group_timeline(name):
     group=find_group(name)
@@ -696,12 +712,14 @@ def suggestion_for_entry(entry):
     return None if dismissed else {"entryId":entry["id"],"transcription":entry["transcription"],"createdAt":entry["created_at"],**suggestion}
 
 @app.get("/api/group-suggestions")
+@app.get("/api/collection-suggestions")
 @api_auth
 def group_suggestions():
     entries=db().execute("SELECT id,transcription,created_at FROM entries WHERE group_name IS NULL AND archived=0 ORDER BY created_at DESC LIMIT 200").fetchall()
     return jsonify([suggestion for entry in entries if (suggestion:=suggestion_for_entry(entry))][:50])
 
 @app.post("/api/group-suggestions/<entry_id>/accept")
+@app.post("/api/collection-suggestions/<entry_id>/accept")
 @api_auth
 def accept_group_suggestion(entry_id):
     entry=db().execute("SELECT id,transcription,created_at FROM entries WHERE id=? AND group_name IS NULL",(entry_id,)).fetchone()
@@ -712,6 +730,7 @@ def accept_group_suggestion(entry_id):
     log_activity("info","group",f"Accepted suggestion for {suggestion['group']}",entry_id); return jsonify(ok=True,group=suggestion["group"])
 
 @app.post("/api/group-suggestions/<entry_id>/dismiss")
+@app.post("/api/collection-suggestions/<entry_id>/dismiss")
 @api_auth
 def dismiss_group_suggestion(entry_id):
     entry=db().execute("SELECT id,transcription,created_at FROM entries WHERE id=? AND group_name IS NULL",(entry_id,)).fetchone()
@@ -721,13 +740,21 @@ def dismiss_group_suggestion(entry_id):
     db().execute("INSERT OR REPLACE INTO group_suggestion_dismissals(entry_id,group_name,dismissed_at) VALUES(?,?,?)",(entry_id,suggestion["group"],now())); db().commit()
     log_activity("info","group",f"Dismissed suggestion for {suggestion['group']}",entry_id); return jsonify(ok=True)
 
+def entry_dict(row, collection_vocabulary=False):
+    item=dict(row)
+    if collection_vocabulary:item["collection_name"]=item["group_name"]
+    return item
+
 @app.get("/api/entries")
+@app.get("/api/items")
 @api_auth
 def entries():
     where=[]; values=[]
     q=request.args.get("q","").strip()
-    if q: where.append("(transcription LIKE ? OR title LIKE ? OR tags LIKE ?)"); values += [f"%{q}%"]*3
-    for field in ("category","processed","starred","archived","group_name"):
+    if q: where.append("(transcription LIKE ? OR title LIKE ? OR tags LIKE ? OR group_name LIKE ?)"); values += [f"%{q}%"]*4
+    collection_name=request.args.get("collection_name")
+    if collection_name not in (None,""):where.append("group_name=?");values.append(collection_name)
+    for field in ("category","processed","completed","starred","archived","group_name"):
         if request.args.get(field) not in (None,""): where.append(f"{field}=?"); values.append(request.args[field])
     view=request.args.get("view","")
     if view=="reminders":where.append("due_at IS NOT NULL AND reminder_completed=0")
@@ -739,12 +766,16 @@ def entries():
     total=db().execute("SELECT count(*) FROM entries"+clause,values).fetchone()[0]
     order="due_at,created_at" if view in {"today","reminders"} else "created_at DESC"
     rows=db().execute("SELECT * FROM entries"+clause+f" ORDER BY {order} LIMIT ? OFFSET ?",(*values,limit,(page-1)*limit)).fetchall()
-    return jsonify(items=[dict(r) for r in rows],page=page,limit=limit,total=total,pages=max(1,(total+limit-1)//limit))
+    collection_vocabulary=request.path=="/api/items"
+    return jsonify(items=[entry_dict(r,collection_vocabulary) for r in rows],page=page,limit=limit,total=total,pages=max(1,(total+limit-1)//limit))
 
 @app.patch("/api/entries/<entry_id>")
+@app.patch("/api/items/<entry_id>")
 @api_auth
 def update_entry(entry_id):
-    body=request.get_json(force=True); allowed={"starred","processed","archived","tags","transcription","title","category","group_name","due_at","reminder_completed","reminder_notify_before_minutes"}; updates={k:body[k] for k in body if k in allowed}
+    body=request.get_json(force=True)
+    if "collection_name" in body and "group_name" not in body:body["group_name"]=body["collection_name"]
+    allowed={"starred","processed","completed","archived","tags","transcription","title","category","group_name","due_at","reminder_completed","reminder_notify_before_minutes"}; updates={k:body[k] for k in body if k in allowed}
     if "category" in updates and updates["category"] not in VALID_CATEGORIES:return jsonify(error="Invalid category"),400
     if "group_name" in updates:
         requested=normalized_group_name(updates["group_name"]) if updates["group_name"] else None
@@ -769,18 +800,23 @@ def update_entry(entry_id):
                 lead=int(updates["reminder_notify_before_minutes"])
                 updates["reminder_notify_before_minutes"]=min(lead,10080) if lead>0 else None
             except (TypeError,ValueError):return jsonify(error="Invalid reminder lead time"),400
-    previous=db().execute("SELECT group_name FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","archived","reminder_completed","reminder_notify_before_minutes"} and v is not None else (None if v is None else str(v)) for k,v in updates.items()]
+    previous=db().execute("SELECT group_name,completed FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","completed","archived","reminder_completed","reminder_notify_before_minutes"} and v is not None else (None if v is None else str(v)) for k,v in updates.items()]
     cur=db().execute(f"UPDATE entries SET {', '.join(k+'=?' for k in updates)} WHERE id=?",(*values,entry_id)); db().commit()
-    if cur.rowcount and "group_name" in updates and previous["group_name"]!=updates["group_name"]:log_activity("info","group",f"Moved entry from {previous['group_name'] or 'standalone'} to {updates['group_name'] or 'standalone'}",entry_id)
+    if cur.rowcount and "group_name" in updates and previous["group_name"]!=updates["group_name"]:log_activity("info","collection_changed",f"Moved item from {previous['group_name'] or 'standalone'} to {updates['group_name'] or 'standalone'}",entry_id)
+    if cur.rowcount and "completed" in updates and previous["completed"]!=int(updates["completed"]):log_activity("info","item_completed" if updates["completed"] else "item_reopened","Completed item" if updates["completed"] else "Reopened item",entry_id)
     return (jsonify(ok=True) if cur.rowcount else (jsonify(error="Not found"),404))
 
 @app.post("/api/entries/bulk")
+@app.post("/api/items/bulk")
 @api_auth
 def bulk():
     body=request.get_json(force=True); ids=[str(x) for x in body.get("ids",[])][:500]; action=body.get("action")
-    mapping={"archive":("archived",1),"restore":("archived",0),"process":("processed",1),"unprocess":("processed",0),"star":("starred",1),"unstar":("starred",0)}
+    mapping={"archive":("archived",1),"restore":("archived",0),"process":("processed",1),"unprocess":("processed",0),"complete":("completed",1),"reopen":("completed",0),"star":("starred",1),"unstar":("starred",0)}
     if not ids or action not in mapping:return jsonify(error="Invalid bulk request"),400
-    field,value=mapping[action]; marks=",".join("?"*len(ids)); cur=db().execute(f"UPDATE entries SET {field}=? WHERE id IN ({marks})",(value,*ids)); db().commit(); return jsonify(ok=True,updated=cur.rowcount)
+    field,value=mapping[action]; marks=",".join("?"*len(ids)); cur=db().execute(f"UPDATE entries SET {field}=? WHERE id IN ({marks})",(value,*ids)); db().commit()
+    if action in {"complete","reopen"}:
+        for entry_id in ids:log_activity("info","item_completed" if value else "item_reopened","Completed item" if value else "Reopened item",entry_id)
+    return jsonify(ok=True,updated=cur.rowcount)
 
 def remove_entry(entry_id):
     row=db().execute("SELECT audio_path FROM entries WHERE id=?",(entry_id,)).fetchone()
@@ -792,15 +828,18 @@ def remove_entry(entry_id):
     return True
 
 @app.delete("/api/entries/<entry_id>")
+@app.delete("/api/items/<entry_id>")
 @api_auth
 def delete_entry(entry_id): return jsonify(ok=True) if remove_entry(entry_id) else (jsonify(error="Not found"),404)
 
 @app.delete("/api/entries")
+@app.delete("/api/items")
 @api_auth
 def delete_bulk():
     ids=[str(x) for x in (request.get_json(force=True).get("ids") or [])][:500]; return jsonify(ok=True,deleted=sum(remove_entry(x) for x in ids))
 
 @app.get("/api/entries/<entry_id>/audio")
+@app.get("/api/items/<entry_id>/audio")
 @api_auth
 def audio(entry_id):
     row=db().execute("SELECT audio_path,audio_mime FROM entries WHERE id=?",(entry_id,)).fetchone()
@@ -848,7 +887,7 @@ def change_feed_since(since,latest=None):
     if latest is None:latest=db().execute("SELECT coalesce(max(id),0) FROM activity").fetchone()[0]
     placeholders=",".join("?" for _ in CAPTURE_EVENT_KINDS)
     rows=db().execute(f"""SELECT id,created_at,level,kind,message,
-      CASE WHEN kind IN ('capture_standalone','capture_grouped','group_unrecognized') THEN details ELSE '' END AS details
+      CASE WHEN kind IN ('capture_standalone','capture_grouped','group_unrecognized','item_completed','item_reopened','collection_changed') THEN details ELSE '' END AS details
       FROM activity WHERE id>? AND kind IN ({placeholders}) ORDER BY id LIMIT 50""",(since,*sorted(CAPTURE_EVENT_KINDS))).fetchall()
     sequence=rows[-1]["id"] if len(rows)==50 else latest
     return {"sequence":sequence,"events":[dict(row) for row in rows]}
@@ -877,11 +916,14 @@ def status():
     backup=db().execute("SELECT * FROM backup_runs ORDER BY requested_at DESC LIMIT 1").fetchone(); latest=db().execute("SELECT * FROM backup_runs WHERE status='success' ORDER BY completed_at DESC LIMIT 1").fetchone()
     return jsonify(entries=count,audioEntries=audio_count,audioBytes=audio_bytes,databaseBytes=db_bytes,lastBackupHook=BACKUP_HOOK_URL!="",trustedProxyHops=TRUSTED_PROXY_HOPS,lastBackup=dict(backup) if backup else None,latestVerifiedBackup=dict(latest) if latest else None,transcriptionEnabled=TRANSCRIPTION_ENABLED,transcriptionModel=TRANSCRIPTION_MODEL)
 
-def export_rows(): return [dict(r) for r in db().execute("SELECT * FROM entries ORDER BY created_at DESC")]
+def export_item(row):
+    item=dict(row);item["collection_name"]=item["group_name"];return item
+
+def export_rows(): return [export_item(r) for r in db().execute("SELECT * FROM entries ORDER BY created_at DESC")]
 
 def markdown_export(rows, title=None):
     heading=f"# {title}\n\n" if title else ""
-    return heading+"\n\n".join(f"## {r['recorded_at'] or r['created_at']}\n\n{r['transcription']}\n\nCategory: {r['category']}\n\nTags: {r['tags']}" for r in rows)
+    return heading+"\n\n".join(f"## {r['recorded_at'] or r['created_at']}\n\n{r['transcription']}\n\nCategory: {r['category']}\n\nCollection: {r.get('collection_name') or r.get('group_name') or 'Standalone'}\n\nCompleted: {'yes' if r.get('completed') else 'no'}\n\nProcessed: {'yes' if r.get('processed') else 'no'}\n\nTags: {r['tags']}" for r in rows)
 
 def export_response(fmt, rows, basename, title=None):
     if fmt=="json":return Response(json.dumps(rows,indent=2,ensure_ascii=False),headers={"Content-Disposition":f"attachment; filename={basename}.json"},mimetype="application/json")
@@ -896,17 +938,19 @@ def export_response(fmt, rows, basename, title=None):
     return jsonify(error="Use json, markdown, or zip"),400
 
 @app.get("/api/export/<fmt>")
+@app.get("/api/items/export/<fmt>")
 @api_auth
 def export(fmt):
     return export_response(fmt,export_rows(),"index-inbox")
 
 @app.get("/api/groups/<name>/export/<fmt>")
+@app.get("/api/collections/<name>/export/<fmt>")
 @api_auth
 def export_group(name,fmt):
     group=find_group(name)
     if not group:return jsonify(error="Group not found"),404
     canonical=group["name"]
-    return export_response(fmt,group_entries(canonical),f"index-inbox-{canonical.lower()}",canonical)
+    return export_response(fmt,[export_item(row) for row in group_entries(canonical)],f"index-inbox-{canonical.lower()}",canonical)
 
 @app.post("/api/maintenance/retention")
 @api_auth
@@ -948,14 +992,18 @@ def create_backup_archive():
         check=destination.execute("PRAGMA quick_check").fetchone()[0]
         if check!="ok":raise RuntimeError(f"SQLite snapshot integrity check failed: {check}")
         entry_count=destination.execute("SELECT count(*) FROM entries").fetchone()[0]
-        audio_rows=destination.execute("SELECT audio_path FROM entries WHERE audio_path IS NOT NULL ORDER BY audio_path").fetchall(); destination.close()
+        audio_rows=destination.execute("SELECT audio_path FROM entries WHERE audio_path IS NOT NULL ORDER BY audio_path").fetchall()
+        completed_items=destination.execute("SELECT count(*) FROM entries WHERE completed=1").fetchone()[0]
+        collections=destination.execute("SELECT count(*) FROM note_groups").fetchone()[0]
+        schema_version=destination.execute("PRAGMA user_version").fetchone()[0]
+        destination.close()
         files={}; digest,size=file_digest(snapshot_path); files["index-inbox.sqlite3"]={"sha256":digest,"bytes":size}
         audio_paths=[]
         for row in audio_rows:
             source=AUDIO_DIR/row[0]
             if not source.is_file():raise RuntimeError(f"Stored audio file is missing: {row[0]}")
             digest,size=file_digest(source); archive_path=f"audio/{row[0]}"; files[archive_path]={"sha256":digest,"bytes":size}; audio_paths.append((source,archive_path))
-        manifest={"version":1,"createdAt":completed,"runId":run_id,"entries":entry_count,"audioEntries":len(audio_paths),"files":files}
+        manifest={"version":1,"schemaVersion":schema_version,"createdAt":completed,"runId":run_id,"entries":entry_count,"completedItems":completed_items,"collections":collections,"audioEntries":len(audio_paths),"files":files}
         handle=tempfile.NamedTemporaryFile(prefix=".backup-",suffix=".zip",dir=BACKUP_DIR,delete=False); temporary_archive=Path(handle.name); handle.close()
         with zipfile.ZipFile(temporary_archive,"w",zipfile.ZIP_DEFLATED) as archive:
             archive.write(snapshot_path,"index-inbox.sqlite3")
@@ -986,9 +1034,11 @@ def verify_backup_archive(path):
             if digest.hexdigest()!=metadata.get("sha256") or size!=metadata.get("bytes"):raise ValueError(f"Backup checksum failed for {name}")
         with tempfile.TemporaryDirectory(prefix="index-inbox-verify-") as directory:
             snapshot=Path(directory)/"index-inbox.sqlite3"; snapshot.write_bytes(archive.read("index-inbox.sqlite3")); connection=sqlite3.connect(snapshot)
-            check=connection.execute("PRAGMA quick_check").fetchone()[0]; entries=connection.execute("SELECT count(*) FROM entries").fetchone()[0]; audio_entries=connection.execute("SELECT count(*) FROM entries WHERE audio_path IS NOT NULL").fetchone()[0]; connection.close()
-        if check!="ok" or entries!=manifest.get("entries") or audio_entries!=manifest.get("audioEntries"):raise ValueError("Backup database contents do not match the manifest")
-        return {"ok":True,"runId":manifest["runId"],"entries":entries,"audioEntries":audio_entries,"createdAt":manifest["createdAt"]}
+            check=connection.execute("PRAGMA quick_check").fetchone()[0]; entries=connection.execute("SELECT count(*) FROM entries").fetchone()[0]; audio_entries=connection.execute("SELECT count(*) FROM entries WHERE audio_path IS NOT NULL").fetchone()[0]
+            columns={row[1] for row in connection.execute("PRAGMA table_info(entries)")};completed_items=connection.execute("SELECT count(*) FROM entries WHERE completed=1").fetchone()[0] if "completed" in columns else 0
+            collections=connection.execute("SELECT count(*) FROM note_groups").fetchone()[0];schema_version=connection.execute("PRAGMA user_version").fetchone()[0];connection.close()
+        if check!="ok" or entries!=manifest.get("entries") or audio_entries!=manifest.get("audioEntries") or ("completedItems" in manifest and completed_items!=manifest["completedItems"]) or ("collections" in manifest and collections!=manifest["collections"]):raise ValueError("Backup database contents do not match the manifest")
+        return {"ok":True,"runId":manifest["runId"],"entries":entries,"completedItems":completed_items,"collections":collections,"audioEntries":audio_entries,"schemaVersion":schema_version,"createdAt":manifest["createdAt"]}
 
 @app.post("/api/backups")
 @api_auth

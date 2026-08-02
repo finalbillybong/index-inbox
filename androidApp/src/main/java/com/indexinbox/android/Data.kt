@@ -71,7 +71,7 @@ interface PendingCaptureDao {
     suspend fun delete(id: String)
 }
 
-@Database(entities = [Entry::class,PendingCapture::class], version = 4, exportSchema = false)
+@Database(entities = [Entry::class,PendingCapture::class], version = 5, exportSchema = false)
 abstract class IndexDatabase : RoomDatabase() {
     abstract fun entries(): EntryDao
     abstract fun pending(): PendingCaptureDao
@@ -80,7 +80,7 @@ abstract class IndexDatabase : RoomDatabase() {
         @Volatile private var instance: IndexDatabase? = null
         fun get(context: Context): IndexDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context, IndexDatabase::class.java, "index-inbox.db")
-                .addMigrations(MIGRATION_1_2,MIGRATION_2_3,MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2,MIGRATION_2_3,MIGRATION_3_4,MIGRATION_4_5)
                 .build().also { instance = it }
         }
         private val MIGRATION_1_2=object:Migration(1,2) {
@@ -105,6 +105,12 @@ abstract class IndexDatabase : RoomDatabase() {
         private val MIGRATION_3_4=object:Migration(3,4) {
             override fun migrate(db:SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE entries ADD COLUMN reminderNotifyBeforeMinutes INTEGER")
+            }
+        }
+        private val MIGRATION_4_5=object:Migration(4,5) {
+            override fun migrate(db:SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE entries ADD COLUMN completed INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE entries ADD COLUMN collectionName TEXT")
             }
         }
     }
