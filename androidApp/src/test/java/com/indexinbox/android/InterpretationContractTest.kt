@@ -35,4 +35,16 @@ class InterpretationContractTest {
         assertTrue(result.requiresConfirmation)
         assertTrue(result.arguments["candidates"].toString().contains("one"))
     }
+
+    @Test
+    fun previewWordingMatchesSharedClientContract() {
+        val plain=InterpretationResult("1.0","create_item",kotlinx.serialization.json.buildJsonObject{},1.0,"Create a standalone Item.",false,false)
+        val completion=plain.copy(operation="complete_item",confidence=.98,requiresConfirmation=true)
+        val ambiguous=completion.copy(confidence=.45,ambiguous=true)
+        assertEquals("Create a standalone Item",interpretationOperationLabel(plain.operation))
+        assertEquals("High confidence",interpretationConfidenceLabel(plain))
+        assertEquals("Confirmation required",interpretationConfidenceLabel(completion))
+        assertEquals("Needs correction",interpretationConfidenceLabel(ambiguous))
+        assertEquals("confirm",ManualCapture("Complete milk",interpretationAction="confirm").interpretationAction)
+    }
 }

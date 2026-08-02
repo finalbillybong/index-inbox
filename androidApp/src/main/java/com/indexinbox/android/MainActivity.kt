@@ -113,6 +113,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonNull
@@ -696,7 +697,13 @@ class IndexViewModel(
         }
     }
 
-    fun capture(text: String, title: String = "", category: String = "note") {
+    fun interpret(text:String,callback:(Result<InterpretationResult>)->Unit) {
+        val server=auth.serverUrl ?: return callback(Result.failure(IllegalStateException("Server is not configured")))
+        val token=auth.token ?: return callback(Result.failure(IllegalStateException("Sign in again")))
+        viewModelScope.launch { callback(runCatching { ApiFactory.create(server,token).interpret(InterpretationRequest(text.trim(),OffsetDateTime.now().toString())) }) }
+    }
+
+    fun capture(text: String, title: String = "", category: String = "note", interpretationAction:String?=null) {
         if (text.isBlank()) return
         val server = auth.serverUrl ?: return
         val token = auth.token ?: return
@@ -704,12 +711,12 @@ class IndexViewModel(
         viewModelScope.launch {
             _state.value=_state.value.copy(loading=true,error=null)
             try {
-                ApiFactory.create(server, token).capture(ManualCapture(text.trim(), title.trim(),category,id=captureId))
+                ApiFactory.create(server, token).capture(ManualCapture(text.trim(), title.trim(),category,id=captureId,interpretationAction=interpretationAction))
                 showCapture(false)
                 refresh()
             } catch(error:Exception) {
                 if(shouldQueue(error)) {
-                    queueCapture(title,text,category,null,error,captureId)
+                    queueCapture(title,text,category,null,error,captureId,interpretationAction)
                     showCapture(false)
                 } else _state.value=_state.value.copy(error=error.message?:"Capture failed")
             } finally {
@@ -718,7 +725,7 @@ class IndexViewModel(
         }
     }
 
-    fun captureAudio(file: File, text: String, title: String = "", category: String = "note") {
+    fun captureAudio(file: File, text: String, title: String = "", category: String = "note", interpretationAction:String?=null) {
         val server = auth.serverUrl ?: return
         val token = auth.token ?: return
         val captureId=UUID.randomUUID().toString()
@@ -735,6 +742,7 @@ class IndexViewModel(
                     category.toRequestBody(plain),
                     System.currentTimeMillis().toString().toRequestBody(plain),
                     captureId.toRequestBody(plain),
+                    (interpretationAction?:"").toRequestBody(plain),
                 )
                 file.delete()
                 showCapture(false)
@@ -744,7 +752,7 @@ class IndexViewModel(
                     val directory=File(getApplication<Application>().filesDir,"pending-audio").apply{mkdirs()}
                     val durable=File(directory,"${UUID.randomUUID()}.m4a")
                     file.copyTo(durable,overwrite=true)
-                    queueCapture(title,text,category,durable.absolutePath,error,captureId)
+                    queueCapture(title,text,category,durable.absolutePath,error,captureId,interpretationAction)
                     showCapture(false)
                 } else _state.value=_state.value.copy(error=error.message?:"Capture failed")
             } finally {
@@ -755,8 +763,8 @@ class IndexViewModel(
 
     private fun shouldQueue(error: Exception)=error is IOException||(error is HttpException&&error.code()>=500)
 
-    private suspend fun queueCapture(title:String,text:String,category:String,audioPath:String?,error:Exception,captureId:String=UUID.randomUUID().toString()) {
-        pendingDao.upsert(PendingCapture(captureId,title.trim(),text.trim(),category,audioPath,System.currentTimeMillis(),error.message?:"Offline"))
+    private suspend fun queueCapture(title:String,text:String,category:String,audioPath:String?,error:Exception,captureId:String=UUID.randomUUID().toString(),interpretationAction:String?=null) {
+        pendingDao.upsert(PendingCapture(captureId,title.trim(),text.trim(),category,audioPath,System.currentTimeMillis(),error.message?:"Offline",interpretationAction))
         PendingCaptureWorker.schedule(getApplication())
         _state.value=_state.value.copy(error="Saved to pending captures; it will retry automatically")
     }
@@ -1111,14 +1119,15 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             initialCategory = SharedCapture.category,
             loading = state.loading,
             onClose = ::closeCapture,
-            onSave = { title, text, category -> SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"; viewModel.capture(text, title,category) },
-            onSaveAudio = { title, text, category, file ->
+            onSave = { title, text, category, action -> SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"; viewModel.capture(text, title,category,action) },
+            onSaveAudio = { title, text, category, file, action ->
                 val widgetAudio = SharedCapture.audioPath != null
                 SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"
                 if (widgetAudio) CaptureWidgetState.set(viewModel.getApplication(), "ready")
-                viewModel.captureAudio(file, text,title,category)
+                viewModel.captureAudio(file, text,title,category,action)
             },
             onTranscribe = viewModel::transcribeAudio,
+            onInterpret = viewModel::interpret,
         )
         state.selected != null -> EntryScreen(
             entry = state.selected!!,
@@ -2236,9 +2245,10 @@ private fun CaptureScreen(
     initialCategory: String = "note",
     loading: Boolean,
     onClose: () -> Unit,
-    onSave: (String, String, String) -> Unit,
-    onSaveAudio: (String, String, String, File) -> Unit,
+    onSave: (String, String, String, String) -> Unit,
+    onSaveAudio: (String, String, String, File, String) -> Unit,
     onTranscribe: (File, (Result<String>) -> Unit) -> Unit,
+    onInterpret: (String, (Result<InterpretationResult>) -> Unit) -> Unit,
 ) {
     val context = LocalContext.current
     var title by remember { mutableStateOf("") }
@@ -2248,6 +2258,8 @@ private fun CaptureScreen(
     var recordingFile by remember(initialAudio) { mutableStateOf(initialAudio) }
     var isRecording by remember { mutableStateOf(false) }
     var status by remember(initialStatus) { mutableStateOf(initialStatus) }
+    var interpretation by remember { mutableStateOf<InterpretationResult?>(null) }
+    var interpreting by remember { mutableStateOf(false) }
     fun stopRecording() {
         runCatching { recorder?.stop() }
         recorder?.release()
@@ -2294,6 +2306,16 @@ private fun CaptureScreen(
                     status = "Transcription failed: ${it.message}. The recording is still available."
                 }
             }
+        }
+    }
+    LaunchedEffect(text) {
+        interpretation=null
+        if(text.isBlank())return@LaunchedEffect
+        delay(350)
+        interpreting=true
+        onInterpret(text) { result ->
+            interpreting=false
+            result.onSuccess { interpretation=it }.onFailure { status="Could not preview operation: ${it.message}" }
         }
     }
     val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -2344,19 +2366,54 @@ private fun CaptureScreen(
                     status = ""
                 }) { Text("Discard recording") }
             }
+            if(interpreting) Text("Interpreting capture…",style=MaterialTheme.typography.bodySmall)
+            interpretation?.let { proposal ->
+                val review=proposal.ambiguous||proposal.requiresConfirmation
+                Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp),verticalArrangement=Arrangement.spacedBy(5.dp)) {
+                    Text(interpretationConfidenceLabel(proposal),style=MaterialTheme.typography.labelSmall,color=if(review)MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                    Text(interpretationOperationLabel(proposal.operation),fontWeight=FontWeight.Bold)
+                    Text(proposal.explanation,style=MaterialTheme.typography.bodySmall)
+                    if(review) FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick={
+                            val audio=recordingFile
+                            if(audio!=null)onSaveAudio(title,text,category,audio,"plain") else onSave(title,text,category,"plain")
+                        },enabled=!loading){Text("Save as plain Item")}
+                        if(!proposal.ambiguous)Button(onClick={
+                            val audio=recordingFile
+                            if(audio!=null)onSaveAudio(title,text,category,audio,"confirm") else onSave(title,text,category,"confirm")
+                        },enabled=!loading){Text("Confirm operation")}
+                    }
+                } }
+            }
             Button(
                 onClick = {
                     if (isRecording) stopRecording()
                     val audio = recordingFile
-                    if (audio != null) onSaveAudio(title,text,category,audio) else onSave(title,text,category)
+                    if (audio != null) onSaveAudio(title,text,category,audio,"accept") else onSave(title,text,category,"accept")
                 },
-                enabled = !loading && !isRecording && (text.isNotBlank() || recordingFile != null),
+                enabled = !loading && !interpreting && !isRecording && (text.isNotBlank() || recordingFile != null) && interpretation?.let{!it.ambiguous&&!it.requiresConfirmation}==true,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (loading) "Saving and transcribing…" else "Save to inbox")
             }
         }
     }
+}
+
+internal fun interpretationOperationLabel(operation:String)=mapOf(
+    "create_item" to "Create a standalone Item",
+    "create_collection" to "Create a Collection",
+    "add_to_collection" to "Add to a Collection",
+    "set_reminder" to "Create an Item with a reminder",
+    "complete_item" to "Complete an Item",
+    "search_items" to "Search Items",
+)[operation]?:operation
+
+internal fun interpretationConfidenceLabel(result:InterpretationResult)=when {
+    result.ambiguous -> "Needs correction"
+    result.requiresConfirmation -> "Confirmation required"
+    result.confidence>=.9 -> "High confidence"
+    else -> "Check proposal"
 }
 
 private fun formatDate(value: String): String = runCatching {

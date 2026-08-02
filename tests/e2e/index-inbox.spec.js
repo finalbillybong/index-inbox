@@ -39,7 +39,7 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.3.0');
+    await expect(page.locator('.version')).toHaveText('v1.4.0');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
@@ -250,6 +250,35 @@ test.describe('Index Inbox browser flows', () => {
     await expect(page.locator('#record-preview')).toBeVisible();
     await expect(page.locator('#manual-text')).toHaveValue('locally transcribed browser audio');
     await expect(page.locator('#record-status')).toContainText('Transcription ready');
+    await expect(page.locator('#operation-title')).toHaveText('Create a standalone Item');
+    await expect(page.locator('#operation-confidence')).toHaveText('High confidence');
+  });
+
+  test('ambiguous capture can be corrected or saved as a plain Item', async ({ page }) => {
+    await login(page);
+    await page.locator('#capture').click();
+    await page.locator('#manual-text').fill('Create a collection with spaces');
+    await expect(page.locator('#operation-confidence')).toHaveText('Needs correction');
+    await expect(page.locator('#capture-save')).toBeDisabled();
+    await expect(page.locator('#operation-confirm')).toBeHidden();
+    await page.locator('#operation-plain').click();
+    await expect(page.locator('#capture-dialog')).not.toBeVisible();
+    await expect(page.locator('#entries textarea.text').first()).toHaveValue('Create a collection with spaces');
+  });
+
+  test('installed PWA uses the same capture preview and correction actions', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => {
+      const original=window.matchMedia.bind(window);
+      window.matchMedia=query => query==='(display-mode: standalone)' ? {matches:true,media:query,onchange:null,addListener(){},removeListener(){},addEventListener(){},removeEventListener(){},dispatchEvent(){return true}} : original(query);
+    });
+    await login(page);
+    await expect(page.locator('#install')).toBeHidden();
+    await page.locator('#nav-capture').click();
+    await page.locator('#manual-text').fill('Complete an Item that is not here');
+    await expect(page.locator('#operation-confidence')).toHaveText('Needs correction');
+    await expect(page.locator('#operation-plain')).toBeVisible();
+    await expect(page.locator('#operation-confirm')).toBeHidden();
   });
 
   test('mobile Settings sections and actions do not overlap', async ({ page }) => {

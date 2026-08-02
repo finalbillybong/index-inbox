@@ -565,6 +565,31 @@ class LocalAuthTests(unittest.TestCase):
         login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
         self.assertEqual(self.client.post("/api/interpret",json={"text":"Find milk","referenceAt":"not-a-date"},headers=headers).status_code,400)
 
+    def test_manual_preview_requires_completion_confirmation_and_supports_plain_override(self):
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        with self.module.app.app_context():
+            self.module.db().execute("""INSERT INTO entries(id,created_at,transcription,payload_json,title,category)
+              VALUES(?,?,?,?,?,?)""",("preview-complete-item",self.module.now(),"buy coffee","{}","Coffee","task"))
+            self.module.db().commit()
+        proposed=self.client.post("/api/manual",json={"transcription":"Complete Coffee","interpretationAction":"accept"},headers=headers)
+        self.assertEqual(proposed.status_code,409)
+        self.assertEqual(proposed.json["interpretation"]["operation"],"complete_item")
+        self.assertTrue(proposed.json["interpretation"]["requiresConfirmation"])
+        with self.module.app.app_context():
+            self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='preview-complete-item'").fetchone()[0],0)
+        confirmed=self.client.post("/api/manual",json={"transcription":"Complete Coffee","interpretationAction":"confirm"},headers=headers)
+        self.assertEqual(confirmed.status_code,200)
+        self.assertEqual(confirmed.json["operation"],"complete_item")
+        with self.module.app.app_context():
+            self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='preview-complete-item'").fetchone()[0],1)
+
+        plain=self.client.post("/api/manual",json={"transcription":"Create a collection with spaces","interpretationAction":"plain"},headers=headers)
+        self.assertEqual(plain.status_code,201)
+        with self.module.app.app_context():
+            row=self.module.db().execute("SELECT transcription,group_name FROM entries WHERE id=?",(plain.json["id"],)).fetchone()
+        self.assertEqual(row["transcription"],"Create a collection with spaces")
+        self.assertIsNone(row["group_name"])
+
     def test_natural_spoken_number_group_aliases(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}
         created=self.client.post("/webhook/index",json={"transcription":"Create Example sixty 5."},headers=headers)

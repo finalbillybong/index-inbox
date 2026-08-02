@@ -614,13 +614,33 @@ def store_entry(payload, upload=None, source="ring"):
         try:reminder_reference=datetime.fromisoformat(str(recorded).replace("Z","+00:00"))
         except ValueError:pass
     requested_collection=first(payload,("collection_name","collectionName","group_name","groupName"),"")
-    interpretation=interpret_capture(transcription,reminder_reference,requested_collection)
+    interpretation_action=str(first(payload,("interpretationAction","interpretation_action"),"")).strip().lower()
+    if interpretation_action not in {"","accept","confirm","plain"}:raise ValueError("Invalid interpretation action")
+    interpretation=(interpretation_result("create_item",{"text":transcription},1.0,"Save as a plain Item.")
+      if interpretation_action=="plain" else interpret_capture(transcription,reminder_reference,requested_collection))
+    if source=="manual" and interpretation_action and interpretation["requiresConfirmation"] and interpretation_action!="confirm":
+        error=ValueError("Confirm the proposed operation or save as a plain Item")
+        error.interpretation=interpretation
+        raise error
+    if source=="manual" and interpretation_action=="confirm" and interpretation["ambiguous"]:
+        error=ValueError("The proposed operation is still ambiguous. Edit the capture or save it as a plain Item")
+        error.interpretation=interpretation
+        raise error
+    if source=="manual" and not interpretation_action and interpretation["requiresConfirmation"]:
+        interpretation=interpretation_result("create_item",{"text":transcription},1.0,"Save as a plain Item.")
     unrecognized_group_command=interpretation["operation"]=="create_item" and interpretation["ambiguous"] and bool(re.match(r"^\s*create\b",transcription,re.IGNORECASE))
     if interpretation["operation"]=="create_collection":
         group_to_create=interpretation["arguments"]["name"];aliases=interpretation["arguments"]["aliases"]; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
         db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
         created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created Collection' if created else 'Collection already exists:'} {group_to_create}",group_to_create)
         return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
+    if interpretation["operation"]=="complete_item":
+        item_id=interpretation["arguments"].get("itemId")
+        if not item_id:raise ValueError("Choose one matching Item before completing it")
+        cursor=db().execute("UPDATE entries SET completed=1 WHERE id=? AND archived=0 AND completed=0",(item_id,));db().commit()
+        if not cursor.rowcount:raise ValueError("The matching Item is no longer available")
+        log_activity("info","item_completed",f"Completed Item matching {interpretation['arguments']['query']}",item_id)
+        return {"id":item_id,"created":False,"duplicate":False,"operation":"complete_item"}
     if requested_collection and interpretation["ambiguous"]:raise ValueError("Collection not found or archived")
     group_name=interpretation["arguments"].get("collectionName")
     if interpretation["operation"] in {"add_to_collection","set_reminder"}:transcription=interpretation["arguments"]["text"]
@@ -931,6 +951,10 @@ def manual():
             return jsonify(ok=True,id=existing["id"],created=False,duplicate=True),200
         if upload and not first(payload,("transcription","transcript","text","content","note")):payload["transcription"]=transcribe_upload(upload)["transcription"]
         result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+    except ValueError as error:
+        body={"error":str(error)}
+        if hasattr(error,"interpretation"):body["interpretation"]=error.interpretation
+        return jsonify(body),409
     except Exception as error:
         log_activity("error","ingest_error","A manual capture could not be stored",str(error)); return jsonify(error="Manual capture failed"),500
 
