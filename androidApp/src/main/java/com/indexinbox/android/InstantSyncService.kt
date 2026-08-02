@@ -28,6 +28,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import retrofit2.HttpException
 import java.io.IOException
 import java.time.Instant
@@ -143,18 +147,22 @@ object NotificationCenter {
         ensureChannels(context)
         val auth=AuthStore(context)
         val quiet=auth.quietHoursEnabled&&isQuietHour(ZonedDateTime.now().hour,auth.quietHoursStart,auth.quietHoursEnd)
+        val operationDetails=if(event.kind=="interpreted_operation") runCatching{Json.parseToJsonElement(event.details).jsonObject}.getOrNull() else null
+        val operationOutcome=operationDetails?.get("outcome")?.jsonPrimitive?.contentOrNull
         val title = when (event.kind) {
             "capture_standalone" -> "Item received"
             "capture_grouped" -> "Collection Item received"
             "group_created" -> "Collection created"
+            "interpreted_operation" -> ringOperationNotificationTitle(operationOutcome)
             "webhook_rejected", "ingest_error" -> "Index Inbox needs attention"
             else -> "Index Inbox"
         }
-        val entryId=event.details.takeIf {
+        val entryId=operationDetails?.get("targetId")?.jsonPrimitive?.contentOrNull ?: event.details.takeIf {
             event.kind in setOf("capture_standalone","capture_grouped","group_unrecognized")
         }
         val entry=entryId?.let { IndexDatabase.get(context).entries().get(it) }
-        val body=if(auth.notificationPreview)notificationBody(entry,event.message) else "Open Index Inbox to view this update"
+        val body=if(auth.notificationPreview&&event.kind=="interpreted_operation") listOf(event.message,entry?.transcription?.trim()).filterNot{it.isNullOrBlank()}.joinToString("\n")
+            else if(auth.notificationPreview)notificationBody(entry,event.message) else "Open Index Inbox to view this update"
         val notificationId=1_000 + event.id.toInt()
         val sound=auth.notificationSound&&!quiet
         val vibration=auth.notificationVibration&&!quiet
@@ -318,3 +326,9 @@ class NotificationActionWorker(context:Context,params:WorkerParameters):Coroutin
 internal fun notificationBody(entry:Entry?,eventMessage:String):String =
     entry?.transcription?.trim().takeUnless{it.isNullOrBlank()}
         ?: if(entry?.audioPath!=null)"Audio Item received. Transcription may still be processing." else eventMessage
+
+internal fun ringOperationNotificationTitle(outcome:String?):String = when(outcome) {
+    "awaiting_confirmation" -> "Ring command needs confirmation"
+    "saved_plain_safely" -> "Ring command needs review"
+    else -> "Ring command completed"
+}

@@ -395,6 +395,16 @@ class IndexViewModel(
         } }
     }
 
+    fun confirmOperation(receiptId:String) {
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy {
+            val api=ApiFactory.create(server,token)
+            api.confirmOperation(receiptId)
+            _activity.value=api.activity()
+            refresh()
+        } }
+    }
+
     fun openGroup(name: String) {
         val server=auth.serverUrl?:return; val token=auth.token?:return
         _state.value=_state.value.copy(screen="timeline")
@@ -1124,7 +1134,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onTestIndexRing=viewModel::testIndexRing,
             onAutomation=viewModel::setAutomation,
         )
-        state.screen == "activity" -> ActivityScreen(activity,state.loading,{viewModel.showScreen("inbox")},viewModel::undoOperation)
+        state.screen == "activity" -> ActivityScreen(activity,state.loading,{viewModel.showScreen("inbox")},viewModel::confirmOperation,viewModel::undoOperation)
         state.screen == "pending" -> PendingCapturesScreen(
             pending,state.loading,
             onBack={viewModel.showScreen("inbox")},
@@ -2158,7 +2168,7 @@ private fun StatusScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ActivityScreen(activity:List<ActivityItem>,loading:Boolean,onBack:()->Unit,onUndo:(String)->Unit) {
+private fun ActivityScreen(activity:List<ActivityItem>,loading:Boolean,onBack:()->Unit,onConfirm:(String)->Unit,onUndo:(String)->Unit) {
     Scaffold(topBar = {
         TopAppBar(
             title = { Text("Recent activity") },
@@ -2174,6 +2184,7 @@ private fun ActivityScreen(activity:List<ActivityItem>,loading:Boolean,onBack:()
                 items(activity, key = { it.id }) { item ->
                     val details=remember(item.details){runCatching{Json.parseToJsonElement(item.details).jsonObject}.getOrNull()}
                     val receiptId=details?.get("receiptId")?.toString()?.trim('"')
+                    val confirmable=details?.get("confirmable")?.toString()=="true"
                     val reversible=details?.get("reversible")?.toString()=="true"
                     val reason=details?.get("reason")?.toString()?.trim('"')
                     val confidence=details?.get("confidence")?.toString()?.toDoubleOrNull()
@@ -2182,6 +2193,7 @@ private fun ActivityScreen(activity:List<ActivityItem>,loading:Boolean,onBack:()
                         Text(item.message)
                         if(!reason.isNullOrBlank()) Text("Why: $reason${confidence?.let { " · confidence %.2f".format(it) } ?: ""}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(formatDate(item.createdAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if(confirmable&&!receiptId.isNullOrBlank())Button(onClick={onConfirm(receiptId)},enabled=!loading){Text("Confirm operation")}
                         if(reversible&&!receiptId.isNullOrBlank())OutlinedButton(onClick={onUndo(receiptId)},enabled=!loading){Text("Undo")}
                     }
                     HorizontalDivider()

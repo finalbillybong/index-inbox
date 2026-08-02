@@ -385,6 +385,10 @@ Header value: the value of WEBHOOK_SECRET
 
 Sending the secret in a header is preferred because query parameters may be recorded in proxy access logs. If the client cannot set headers, Index Inbox also accepts `?token=WEBHOOK_SECRET`.
 
+Choose **Both** in Pebble's webhook payload mode when you want Index Inbox to retain the original audio as well as Pebble's transcription. Index Inbox recognizes Pebble's stable recording filename and `X-Index-Trigger` gesture header, preserves both in **View original payload**, and uses the recording ID to make retries idempotent.
+
+Ring transcriptions use the same deterministic interpretation contract as web, PWA, and Android captures. Enable **Settings → Capture automation** to let unambiguous Collection creation, Collection addition, and reminder commands run automatically. Ordinary speech remains a normal Item. Completion always requires confirmation: Index Inbox saves the Ring command safely, sends a review notification, and offers **Confirm operation** in **Recent activity** on web/PWA and Android. Ambiguous or multiply matched commands are retained as plain Items and never guessed.
+
 Test text ingestion:
 
 ```bash
@@ -400,7 +404,10 @@ Test multipart audio ingestion:
 curl -X POST 'https://index.example.com/webhook/index' \
   -H 'X-Webhook-Secret: YOUR_WEBHOOK_SECRET' \
   -F 'transcription=Audio test' \
-  -F 'audio=@sample.wav'
+  -H 'X-Index-Trigger: double-click-hold' \
+  -F 'recordedAt=1784409957261' \
+  -F 'client=ring' \
+  -F 'audio=@ring-recording-42.m4a;type=audio/mp4'
 ```
 
 ## Voice categories

@@ -103,7 +103,7 @@ def init_db(path=DB_PATH):
       CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS interpreted_operations (id TEXT PRIMARY KEY,created_at TEXT NOT NULL,source TEXT NOT NULL,
         source_key TEXT UNIQUE,operation TEXT NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,
-        target_id TEXT,result_json TEXT NOT NULL,undo_kind TEXT,undo_payload TEXT,reversed_at TEXT);
+        target_id TEXT,result_json TEXT NOT NULL,proposed_json TEXT NOT NULL DEFAULT '{}',undo_kind TEXT,undo_payload TEXT,reversed_at TEXT);
     """)
     con.execute("BEGIN IMMEDIATE")
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
@@ -113,6 +113,8 @@ def init_db(path=DB_PATH):
       "reminder_notify_before_minutes":"INTEGER", "completed":"INTEGER NOT NULL DEFAULT 0"}
     for name, definition in additions.items():
         if name not in columns: con.execute(f"ALTER TABLE entries ADD COLUMN {name} {definition}")
+    operation_columns={r[1] for r in con.execute("PRAGMA table_info(interpreted_operations)")}
+    if "proposed_json" not in operation_columns:con.execute("ALTER TABLE interpreted_operations ADD COLUMN proposed_json TEXT NOT NULL DEFAULT '{}'")
     login_columns={r[1] for r in con.execute("PRAGMA table_info(login_attempts)")}
     if "peer_ip" not in login_columns:con.execute("ALTER TABLE login_attempts ADD COLUMN peer_ip TEXT NOT NULL DEFAULT ''")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source_key ON entries(source_key) WHERE source_key IS NOT NULL")
@@ -149,10 +151,14 @@ def interpretation_with_policy(interpretation):
     return {**interpretation,"autoExecutable":allowed,"autoExecutionReason":reason,"autoExecutionEnabled":setting_bool("automatic_execution",False)}
 
 def operation_receipt(source,source_key,interpretation,reason,result,undo_kind=None,undo_payload=None,status="executed"):
-    receipt_id=str(uuid.uuid4());details={"receiptId":receipt_id,"operation":interpretation["operation"],"outcome":status,"reversible":bool(undo_kind),"reason":reason,"confidence":interpretation["confidence"]}
-    db().execute("""INSERT INTO interpreted_operations(id,created_at,source,source_key,operation,confidence,reason,status,target_id,result_json,undo_kind,undo_payload)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(receipt_id,now(),source,source_key,interpretation["operation"],interpretation["confidence"],reason,status,result.get("id") or result.get("group"),json.dumps(result),undo_kind,json.dumps(undo_payload or {})));db().commit()
-    log_activity("info","interpreted_operation",f"{interpretation['operation'].replace('_',' ').capitalize()}: {status}",json.dumps(details))
+    receipt_id=str(uuid.uuid4());target_id=result.get("id");details={"receiptId":receipt_id,"source":source,"targetId":target_id,"operation":interpretation["operation"],"outcome":status,"reversible":bool(undo_kind),"confirmable":status=="awaiting_confirmation","reason":reason,"confidence":interpretation["confidence"]}
+    db().execute("""INSERT INTO interpreted_operations(id,created_at,source,source_key,operation,confidence,reason,status,target_id,result_json,proposed_json,undo_kind,undo_payload)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(receipt_id,now(),source,source_key,interpretation["operation"],interpretation["confidence"],reason,status,result.get("id") or result.get("group"),json.dumps(result),json.dumps(interpretation),undo_kind,json.dumps(undo_payload or {})));db().commit()
+    label=interpretation["operation"].replace("_"," ")
+    message=(f"Ring command needs confirmation — {reason}" if source=="ring" and status=="awaiting_confirmation"
+      else f"Ring command needs review — {reason}" if source=="ring" and status=="saved_plain_safely"
+      else f"Ring {label}: {status}" if source=="ring" else f"{label.capitalize()}: {status}")
+    log_activity("warning" if status in {"saved_plain_safely","awaiting_confirmation"} else "info","interpreted_operation",message,json.dumps(details))
     return {**result,"operationReceiptId":receipt_id,"operationOutcome":status,"operationReversible":bool(undo_kind)}
 
 def request_origin_allowed():
@@ -634,10 +640,11 @@ def existing_operation_receipt(payload,source):
     source_key=hashlib.sha256(f"{source}:{external_id}".encode()).hexdigest()
     return db().execute("SELECT id,result_json,status,undo_kind FROM interpreted_operations WHERE source_key=?",(source_key,)).fetchone()
 
-def store_entry(payload, upload=None, source="ring"):
+def store_entry(payload, upload=None, source="ring", interpretation_action_override=None):
     entry_id = str(uuid.uuid4()); recorded = normalize_timestamp(first(payload,("recorded_at","recordedAt","timestamp","created_at"),None))
     transcription = first(payload,("transcription","transcript","text","content","note")); trigger = first(payload,("trigger","trigger_type","triggerType","mode","click_type"),source)
     external_id = first(payload,("id","recordingId","recording_id","uuid","eventId"),"")
+    if not external_id and source=="ring" and upload and upload.filename:external_id=Path(upload.filename).stem
     basis = external_id or (json.dumps(payload,sort_keys=True,separators=(",",":")) if recorded else "")
     source_key = hashlib.sha256(f"{source}:{basis}".encode()).hexdigest() if basis else None
     if source_key:
@@ -656,7 +663,7 @@ def store_entry(payload, upload=None, source="ring"):
         try:reminder_reference=datetime.fromisoformat(str(recorded).replace("Z","+00:00"))
         except ValueError:pass
     requested_collection=first(payload,("collection_name","collectionName","group_name","groupName"),"")
-    interpretation_action=str(first(payload,("interpretationAction","interpretation_action"),"")).strip().lower()
+    interpretation_action=str(interpretation_action_override or first(payload,("interpretationAction","interpretation_action"),"")).strip().lower()
     if interpretation_action not in {"","accept","confirm","plain","auto"}:raise ValueError("Invalid interpretation action")
     interpretation=(interpretation_result("create_item",{"text":transcription},1.0,"Save as a plain Item.")
       if interpretation_action=="plain" else interpret_capture(transcription,reminder_reference,requested_collection))
@@ -664,7 +671,8 @@ def store_entry(payload, upload=None, source="ring"):
     if interpretation_action=="auto":
         allowed,policy_reason=automatic_execution_policy(interpretation);enabled=setting_bool("automatic_execution",False);receipt_reason=policy_reason
         if not (enabled and allowed):
-            receipt_status="saved_plain_safely"
+            if not enabled:receipt_reason="Automatic execution is disabled; the unattended command was saved as a plain Item."
+            receipt_status=("awaiting_confirmation" if enabled and source=="ring" and interpretation["operation"]=="complete_item" and not interpretation["ambiguous"] and interpretation["arguments"].get("itemId") else "saved_plain_safely")
             interpretation=interpretation_result("create_item",{"text":transcription},1.0,"Automatic execution was not allowed; saved as a plain Item.")
     if source=="manual" and interpretation_action and interpretation["requiresConfirmation"] and interpretation_action!="confirm":
         error=ValueError("Confirm the proposed operation or save as a plain Item")
@@ -680,7 +688,8 @@ def store_entry(payload, upload=None, source="ring"):
     if interpretation["operation"]=="create_collection":
         group_to_create=interpretation["arguments"]["name"];aliases=interpretation["arguments"]["aliases"]; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
         db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
-        created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created Collection' if created else 'Collection already exists:'} {group_to_create}",group_to_create)
+        created=bool(cursor.rowcount)
+        if interpretation_action!="auto":log_activity("info","group_created" if created else "group_exists",f"{'Created Collection' if created else 'Collection already exists:'} {group_to_create}",group_to_create)
         result={"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
         return operation_receipt(source,source_key,proposed_interpretation,receipt_reason,result,"remove_collection" if created else None,{"name":group_to_create}) if interpretation_action else result
     if interpretation["operation"]=="complete_item":
@@ -705,14 +714,14 @@ def store_entry(payload, upload=None, source="ring"):
         suffix=Path(upload.filename).suffix.lower()[:10] or ".bin"; audio_path=f"{entry_id}{suffix}"; audio_mime=upload.mimetype or "application/octet-stream"; upload.save(AUDIO_DIR/audio_path)
     db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name,due_at,reminder_notify_before_minutes)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name,due_at,notify_before)); db().commit()
-    if unrecognized_group_command:
+    if unrecognized_group_command and interpretation_action!="auto":
         log_activity("warning","group_unrecognized","Could not create a Collection from that command",entry_id)
-    elif group_name:
+    elif group_name and interpretation_action!="auto":
         log_activity("info","capture_grouped",f"Added an Item to {group_name}",entry_id)
-    else:
+    elif interpretation_action!="auto" or (proposed_interpretation["operation"]=="create_item" and not proposed_interpretation["ambiguous"]):
         log_activity("info","capture_standalone","Added a standalone Item",entry_id)
     result={"id":entry_id,"created":True,"duplicate":False,"group":group_name}
-    if interpretation_action=="auto" or (interpretation_action and proposed_interpretation["operation"]!="create_item"):
+    if (interpretation_action=="auto" and (proposed_interpretation["operation"]!="create_item" or proposed_interpretation["ambiguous"])) or (interpretation_action and interpretation_action!="auto" and proposed_interpretation["operation"]!="create_item"):
         return operation_receipt(source,source_key,proposed_interpretation,receipt_reason,result,"remove_item",{"id":entry_id},receipt_status)
     return result
 
@@ -727,7 +736,10 @@ def ingest():
         source,peer=request_client_addresses(); log_activity("warning","webhook_rejected","Rejected a webhook with invalid authentication",json.dumps({"client":source,"peer":peer})); return jsonify(error="Invalid webhook secret"),401
     try:
         payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
-        result=store_entry(payload,upload); return jsonify(ok=True,**result),(201 if result["created"] else 200)
+        trigger=request.headers.get("X-Index-Trigger","").strip()
+        if trigger:payload["indexTrigger"]=trigger
+        if upload and upload.filename:payload["recordingId"]=Path(upload.filename).stem
+        result=store_entry(payload,upload,"ring","auto"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
     except Exception as error:
         log_activity("error","ingest_error","A webhook could not be stored",str(error)); return jsonify(error="Webhook ingestion failed"),500
 
@@ -1032,8 +1044,9 @@ def activity():
         try:details=json.loads(row["details"] or "{}")
         except (TypeError,json.JSONDecodeError):continue
         receipt_id=details.get("receiptId")
-        if receipt_id and details.get("reversible"):
-            receipt=db().execute("SELECT reversed_at,undo_kind FROM interpreted_operations WHERE id=?",(receipt_id,)).fetchone()
+        if receipt_id:
+            receipt=db().execute("SELECT status,reversed_at,undo_kind FROM interpreted_operations WHERE id=?",(receipt_id,)).fetchone()
+            details["confirmable"]=bool(receipt and receipt["status"]=="awaiting_confirmation")
             details["reversible"]=bool(receipt and receipt["undo_kind"] and not receipt["reversed_at"]);row["details"]=json.dumps(details)
     return jsonify(rows)
 
@@ -1051,6 +1064,24 @@ def update_automation_settings():
     set_setting_bool("automatic_execution",body["enabled"])
     log_activity("info","automation_setting",f"Automatic execution {'enabled' if body['enabled'] else 'disabled'}")
     return automation_settings()
+
+@app.post("/api/operations/<receipt_id>/confirm")
+@api_auth
+def confirm_interpreted_operation(receipt_id):
+    receipt=db().execute("SELECT * FROM interpreted_operations WHERE id=?",(receipt_id,)).fetchone()
+    if not receipt:return jsonify(error="Operation receipt not found"),404
+    if receipt["status"]!="awaiting_confirmation":return jsonify(error="Operation is not awaiting confirmation"),409
+    proposed=json.loads(receipt["proposed_json"] or "{}");result=json.loads(receipt["result_json"] or "{}")
+    if receipt["source"]!="ring" or proposed.get("operation")!="complete_item":return jsonify(error="This deferred operation cannot be confirmed"),409
+    target_id=proposed.get("arguments",{}).get("itemId");command_id=result.get("id")
+    cursor=db().execute("UPDATE entries SET completed=1 WHERE id=? AND archived=0 AND completed=0",(target_id,))
+    if not cursor.rowcount:db().rollback();return jsonify(error="The matching Item is no longer available"),409
+    if command_id:db().execute("UPDATE entries SET archived=1,processed=1,completed=1 WHERE id=?",(command_id,))
+    undo={"id":target_id,"commandId":command_id}
+    db().execute("UPDATE interpreted_operations SET status='executed',target_id=?,undo_kind='undo_ring_completion',undo_payload=? WHERE id=?",(target_id,json.dumps(undo),receipt_id));db().commit()
+    details={"receiptId":receipt_id,"source":"ring","targetId":target_id,"operation":"complete_item","outcome":"executed","confirmable":False,"reversible":True,"reason":"Confirmed by the user.","confidence":receipt["confidence"]}
+    log_activity("info","interpreted_operation", "Ring complete item: confirmed",json.dumps(details))
+    return jsonify(ok=True,receiptId=receipt_id,status="executed",targetId=target_id)
 
 @app.post("/api/operations/<receipt_id>/undo")
 @api_auth
@@ -1070,6 +1101,11 @@ def undo_interpreted_operation(receipt_id):
         if not group:return jsonify(error="The created Collection no longer exists"),409
         if db().execute("SELECT 1 FROM entries WHERE group_name=? LIMIT 1",(group["name"],)).fetchone():return jsonify(error="The Collection now contains Items and cannot be removed automatically"),409
         db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(group["name"],));db().execute("DELETE FROM note_groups WHERE name=?",(normalized_group_name(group["name"]),));db().commit()
+    elif kind=="undo_ring_completion":
+        cursor=db().execute("UPDATE entries SET completed=0 WHERE id=? AND completed=1",(payload.get("id"),))
+        if not cursor.rowcount:db().rollback();return jsonify(error="The completed Item is no longer available to reopen"),409
+        if payload.get("commandId"):db().execute("UPDATE entries SET archived=0,processed=0,completed=0 WHERE id=?",(payload["commandId"],))
+        db().commit()
     else:return jsonify(error="Unknown recovery action"),409
     reversed=now();db().execute("UPDATE interpreted_operations SET status='undone',reversed_at=? WHERE id=?",(reversed,receipt_id));db().commit()
     log_activity("info","interpreted_operation_undone",f"Undid {receipt['operation'].replace('_',' ')}",json.dumps({"receiptId":receipt_id,"operation":receipt["operation"],"outcome":"undone","reversible":False}))
