@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -1001,6 +1002,15 @@ internal fun filterInboxEntries(
  .filter{groupFilter.isBlank()||it.groupName==groupFilter}
  .filter{query.isBlank()||it.title.contains(query,true)||it.transcription.contains(query,true)||it.tags.contains(query,true)}
 
+internal val inboxStateFilters=listOf(
+    "active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All",
+    "unprocessed" to "Unprocessed","incomplete" to "Incomplete","completed" to "Completed",
+    "starred" to "Starred","archived" to "Archived",
+)
+internal val inboxTypeFilters=listOf(
+    "" to "All types","note" to "Notes","task" to "Tasks","idea" to "Ideas","question" to "Questions",
+)
+
 internal fun isDueBeforeTomorrow(value:String):Boolean=runCatching {
     val due=java.time.Instant.parse(value)
     val tomorrow=java.time.ZonedDateTime.now().plusDays(1).toLocalDate()
@@ -1291,6 +1301,53 @@ private fun InboxScreen(
             dismissButton={TextButton(onClick={pendingDelete=null}){Text("Cancel")}},
         )
     }
+    if(filtersExpanded) AlertDialog(
+        onDismissRequest={filtersExpanded=false},
+        title={Text("Filter Items")},
+        text={
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max=520.dp)) {
+                item { Text("State",modifier=Modifier.padding(horizontal=8.dp,vertical=10.dp),fontWeight=FontWeight.Bold) }
+                items(inboxStateFilters) { (value,label) ->
+                    DropdownMenuItem(
+                        text={Text(label)},
+                        leadingIcon={if(filter==value) Icon(Icons.Default.Check,null)},
+                        onClick={onFilter(value)},
+                    )
+                }
+                item {
+                    HorizontalDivider()
+                    Text("Type",modifier=Modifier.padding(horizontal=8.dp,vertical=10.dp),fontWeight=FontWeight.Bold)
+                }
+                items(inboxTypeFilters) { (value,label) ->
+                    DropdownMenuItem(
+                        text={Text(label)},
+                        leadingIcon={if(categoryFilter==value) Icon(Icons.Default.Check,null)},
+                        onClick={onCategoryFilter(value)},
+                    )
+                }
+                if(groups.isNotEmpty()) {
+                    item {
+                        HorizontalDivider()
+                        Text("Collection",modifier=Modifier.padding(horizontal=8.dp,vertical=10.dp),fontWeight=FontWeight.Bold)
+                        DropdownMenuItem(
+                            text={Text("All Collections")},
+                            leadingIcon={if(groupFilter.isBlank()) Icon(Icons.Default.Check,null)},
+                            onClick={onGroupFilter("")},
+                        )
+                    }
+                    items(groups,key={it.name}) { group ->
+                        DropdownMenuItem(
+                            text={Text(group.name)},
+                            leadingIcon={if(groupFilter==group.name) Icon(Icons.Default.Check,null)},
+                            onClick={onGroupFilter(group.name)},
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton={TextButton(onClick={filtersExpanded=false}){Text("Done")}},
+        dismissButton={TextButton(onClick={onFilter("active");onCategoryFilter("");onGroupFilter("")}){Text("Reset")}},
+    )
     val visibleEntries=remember(entries,query,filter,categoryFilter,groupFilter) {
         filterInboxEntries(entries,query,filter,categoryFilter,groupFilter)
     }
@@ -1375,47 +1432,12 @@ private fun InboxScreen(
                 if(pendingCount>0) TextButton(onClick=onPending){Text("Review")}
             }
             Box(Modifier.padding(horizontal=16.dp,vertical=4.dp)) {
-                val stateLabel = mapOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","incomplete" to "Incomplete","completed" to "Completed","starred" to "Starred","archived" to "Archived")[filter] ?: "Active"
-                val typeLabel = mapOf("" to "All types","note" to "Notes","task" to "Tasks","idea" to "Ideas","question" to "Questions")[categoryFilter] ?: "All types"
+                val stateLabel = inboxStateFilters.toMap()[filter] ?: "Active"
+                val typeLabel = inboxTypeFilters.toMap()[categoryFilter] ?: "All types"
                 OutlinedButton(onClick={filtersExpanded=true}) {
                     Icon(Icons.Default.FilterList,null)
                     Spacer(Modifier.width(8.dp))
                     Text(listOf(stateLabel,typeLabel).plus(if(groupFilter.isNotBlank()) listOf(groupFilter) else emptyList()).joinToString(" · "))
-                }
-                DropdownMenu(expanded=filtersExpanded,onDismissRequest={filtersExpanded=false}) {
-                    Text("State",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
-                    listOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","incomplete" to "Incomplete","completed" to "Completed","starred" to "Starred","archived" to "Archived").forEach { (value,label) ->
-                        DropdownMenuItem(
-                            text={Text(label)},
-                            leadingIcon={if(filter==value) Icon(Icons.Default.Check,null)},
-                            onClick={filtersExpanded=false;onFilter(value)},
-                        )
-                    }
-                    HorizontalDivider()
-                    Text("Type",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
-                    listOf("" to "All types","note" to "Notes","task" to "Tasks","idea" to "Ideas","question" to "Questions").forEach { (value,label) ->
-                        DropdownMenuItem(
-                            text={Text(label)},
-                            leadingIcon={if(categoryFilter==value) Icon(Icons.Default.Check,null)},
-                            onClick={filtersExpanded=false;onCategoryFilter(value)},
-                        )
-                    }
-                    if(groups.isNotEmpty()) {
-                        HorizontalDivider()
-                        Text("Collection",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
-                        DropdownMenuItem(
-                            text={Text("All Collections")},
-                            leadingIcon={if(groupFilter.isBlank()) Icon(Icons.Default.Check,null)},
-                            onClick={filtersExpanded=false;onGroupFilter("")},
-                        )
-                        groups.forEach { group ->
-                            DropdownMenuItem(
-                                text={Text(group.name)},
-                                leadingIcon={if(groupFilter==group.name) Icon(Icons.Default.Check,null)},
-                                onClick={filtersExpanded=false;onGroupFilter(group.name)},
-                            )
-                        }
-                    }
                 }
             }
             if(selected.isNotEmpty()) {
