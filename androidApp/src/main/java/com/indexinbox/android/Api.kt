@@ -50,6 +50,9 @@ interface IndexApi {
     @POST("api/manual")
     suspend fun capture(@Body capture: ManualCapture): ApiResult
 
+    @POST("api/interpret")
+    suspend fun interpret(@Body request: InterpretationRequest): InterpretationResult
+
     @Multipart
     @POST("api/manual")
     suspend fun captureAudio(

@@ -514,6 +514,57 @@ class LocalAuthTests(unittest.TestCase):
         response=self.client.get("/api/changes?since=invalid")
         self.assertEqual(response.status_code,400)
 
+    def test_interpretation_contract_covers_deterministic_operations_without_mutation(self):
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        with self.module.app.app_context():
+            stamp=self.module.now()
+            self.module.db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",("INTERPRET42","INTERPRET42",stamp))
+            self.module.db().execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",("interpret 42","INTERPRET42"))
+            self.module.db().execute("""INSERT INTO entries(id,created_at,transcription,payload_json,title,category)
+              VALUES(?,?,?,?,?,?)""",("interpret-open-item",stamp,"buy oat milk","{}","Shopping milk","task"))
+            self.module.db().commit()
+            before=(self.module.db().execute("SELECT count(*) FROM entries").fetchone()[0],self.module.db().execute("SELECT count(*) FROM note_groups").fetchone()[0],self.module.db().execute("SELECT count(*) FROM activity").fetchone()[0])
+
+        cases={
+            "create_item": {"text":"A plain captured thought"},
+            "create_collection": {"text":"Create Project ninety nine"},
+            "add_to_collection": {"text":"Interpret 42 first checklist item"},
+            "set_reminder": {"text":"Remind me tomorrow at 9am to call Mum","referenceAt":"2026-08-02T12:00:00+00:00"},
+            "complete_item": {"text":"Complete Shopping milk"},
+            "search_items": {"text":"Find oat milk"},
+        }
+        results={operation:self.client.post("/api/interpret",json=body,headers=headers) for operation,body in cases.items()}
+        for operation,response in results.items():
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.json["version"],"1.0")
+            self.assertEqual(response.json["operation"],operation)
+            self.assertIsInstance(response.json["arguments"],dict)
+            self.assertIsInstance(response.json["confidence"],float)
+            self.assertIsInstance(response.json["explanation"],str)
+            self.assertIn("ambiguous",response.json)
+            self.assertIn("requiresConfirmation",response.json)
+        self.assertEqual(results["add_to_collection"].json["arguments"]["collectionName"],"INTERPRET42")
+        self.assertEqual(results["complete_item"].json["arguments"]["itemId"],"interpret-open-item")
+        self.assertTrue(results["complete_item"].json["requiresConfirmation"])
+        with self.module.app.app_context():
+            after=(self.module.db().execute("SELECT count(*) FROM entries").fetchone()[0],self.module.db().execute("SELECT count(*) FROM note_groups").fetchone()[0],self.module.db().execute("SELECT count(*) FROM activity").fetchone()[0])
+        self.assertEqual(after,before)
+
+    def test_interpretation_marks_invalid_and_ambiguous_requests_for_confirmation(self):
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        invalid=self.client.post("/api/interpret",json={"text":"Create a collection with spaces"},headers=headers)
+        missing=self.client.post("/api/interpret",json={"text":"Complete something that does not exist"},headers=headers)
+        empty=self.client.post("/api/interpret",json={"text":""},headers=headers)
+        for response in (invalid,missing,empty):
+            self.assertEqual(response.status_code,200)
+            self.assertTrue(response.json["ambiguous"])
+            self.assertTrue(response.json["requiresConfirmation"])
+
+    def test_interpretation_endpoint_requires_auth_and_valid_reference_time(self):
+        self.assertEqual(self.client.post("/api/interpret",json={"text":"Find milk"}).status_code,401)
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        self.assertEqual(self.client.post("/api/interpret",json={"text":"Find milk","referenceAt":"not-a-date"},headers=headers).status_code,400)
+
     def test_natural_spoken_number_group_aliases(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}
         created=self.client.post("/webhook/index",json={"transcription":"Create Example sixty 5."},headers=headers)

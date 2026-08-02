@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class DeviceLoginRequest(val username: String, val password: String, val deviceName: String)
@@ -70,6 +71,24 @@ data class ManualCapture(
     val category: String = "note",
     val recordedAt: Long = System.currentTimeMillis(),
     val id: String? = null,
+)
+
+@Serializable
+data class InterpretationRequest(
+    val text: String,
+    val referenceAt: String? = null,
+    val collectionName: String? = null,
+)
+
+@Serializable
+data class InterpretationResult(
+    val version: String,
+    val operation: String,
+    val arguments: JsonObject,
+    val confidence: Double,
+    val explanation: String,
+    val ambiguous: Boolean,
+    val requiresConfirmation: Boolean,
 )
 
 @Serializable

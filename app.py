@@ -485,6 +485,60 @@ def match_note_group(text):
         if match:return row["display_name"],match.group(1).strip()
     return None,text
 
+INTERPRETATION_VERSION="1.0"
+
+def interpretation_result(operation,arguments,confidence,explanation,ambiguous=False,requires_confirmation=False):
+    return {"version":INTERPRETATION_VERSION,"operation":operation,"arguments":arguments,"confidence":round(float(confidence),2),
+      "explanation":explanation,"ambiguous":bool(ambiguous),"requiresConfirmation":bool(requires_confirmation)}
+
+def completion_candidates(query):
+    query=str(query).strip().rstrip(".!?")
+    if not query:return []
+    exact=db().execute("""SELECT id,title,transcription FROM entries WHERE archived=0 AND completed=0
+      AND (lower(title)=lower(?) OR lower(transcription)=lower(?)) ORDER BY created_at DESC LIMIT 10""",(query,query)).fetchall()
+    rows=exact or db().execute("""SELECT id,title,transcription FROM entries WHERE archived=0 AND completed=0
+      AND (title LIKE ? OR transcription LIKE ?) ORDER BY created_at DESC LIMIT 10""",(f"%{query}%",f"%{query}%")).fetchall()
+    return [{"id":row["id"],"label":row["title"] or row["transcription"][:120]} for row in rows]
+
+def interpret_capture(text,reference=None,requested_collection=""):
+    text=str(text or "").strip()
+    if not text:return interpretation_result("create_item",{"text":""},0.0,"The capture is empty.",True,True)
+    command=create_group_command(text)
+    if command:
+        name,aliases=command
+        return interpretation_result("create_collection",{"name":name,"aliases":sorted(aliases)},1.0,f"Create Collection {name}.")
+    if re.match(r"^\s*create\b",text,re.IGNORECASE):
+        return interpretation_result("create_item",{"text":text},0.35,"The create command does not contain a valid Collection name.",True,True)
+
+    complete_match=(re.fullmatch(r"\s*(?:complete|finish)\s+(.+?)\s*",text,re.IGNORECASE)
+      or re.fullmatch(r"\s*mark\s+(.+?)\s+(?:as\s+)?complete\s*",text,re.IGNORECASE)
+      or re.fullmatch(r"\s*(.+?)\s+is\s+done\s*",text,re.IGNORECASE))
+    if complete_match:
+        query=complete_match.group(1).strip(); candidates=completion_candidates(query)
+        if len(candidates)==1:return interpretation_result("complete_item",{"itemId":candidates[0]["id"],"query":query,"candidates":candidates},0.98,f"Complete the one open Item matching “{query}”.",False,True)
+        explanation=(f"More than one open Item matches “{query}”." if candidates else f"No open Item matches “{query}”.")
+        return interpretation_result("complete_item",{"query":query,"candidates":candidates},0.45 if candidates else 0.2,explanation,True,True)
+
+    search_match=re.fullmatch(r"\s*(?:find|search(?:\s+for)?|show\s+me)\s+(.+?)\s*",text,re.IGNORECASE)
+    if search_match:
+        query=search_match.group(1).strip().rstrip(".!?")
+        return interpretation_result("search_items",{"query":query},0.96,f"Search Items for “{query}”.")
+
+    group_name,group_text=match_note_group(text)
+    if requested_collection:
+        canonical=normalized_group_name(requested_collection)
+        collection=db().execute("SELECT display_name FROM note_groups WHERE name=? AND archived=0",(canonical,)).fetchone() if canonical else None
+        if not collection:return interpretation_result("add_to_collection",{"text":text,"collectionName":str(requested_collection)},0.0,"The requested Collection does not exist or is archived.",True,True)
+        group_name=collection["display_name"];group_text=text
+    reminder=parse_reminder(group_text,reference,REMINDER_ZONE,REMINDER_CLOCK_FORMAT)
+    if reminder:
+        arguments={"text":reminder["text"],"dueAt":reminder["due_at"],"notifyBeforeMinutes":reminder.get("notify_before_minutes")}
+        if group_name:arguments["collectionName"]=group_name
+        return interpretation_result("set_reminder",arguments,0.99,"Create an Item with the requested reminder time.")
+    if group_name:
+        return interpretation_result("add_to_collection",{"text":group_text,"collectionName":group_name},0.99,f"Add an Item to Collection {group_name}.")
+    return interpretation_result("create_item",{"text":text},1.0,"Create a standalone Item.")
+
 def leading_group_candidate(text):
     tokens=re.sub(r"^\s*add\s+to\s+","",str(text),count=1,flags=re.IGNORECASE).strip().split()
     best=None
@@ -555,28 +609,25 @@ def store_entry(payload, upload=None, source="ring"):
     category,cleaned=voice_category(transcription)
     if explicit_category in VALID_CATEGORIES: category=explicit_category
     elif source=="ring": transcription=cleaned
-    group_command=create_group_command(transcription); unrecognized_group_command=bool(re.match(r"^\s*create\b",transcription,re.IGNORECASE)) and not group_command
-    if group_command:
-        group_to_create,aliases=group_command; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
-        db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
-        created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created Collection' if created else 'Collection already exists:'} {group_to_create}",group_to_create)
-        return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
-    group_name,transcription=match_note_group(transcription)
-    requested_collection=first(payload,("collection_name","collectionName","group_name","groupName"),"")
-    if requested_collection:
-        canonical=normalized_group_name(requested_collection)
-        collection=db().execute("SELECT display_name FROM note_groups WHERE name=? AND archived=0",(canonical,)).fetchone() if canonical else None
-        if not collection:raise ValueError("Collection not found or archived")
-        group_name=collection["display_name"]
     reminder_reference=None
     if recorded:
         try:reminder_reference=datetime.fromisoformat(str(recorded).replace("Z","+00:00"))
         except ValueError:pass
-    reminder=parse_reminder(transcription,reminder_reference,REMINDER_ZONE,REMINDER_CLOCK_FORMAT)
+    requested_collection=first(payload,("collection_name","collectionName","group_name","groupName"),"")
+    interpretation=interpret_capture(transcription,reminder_reference,requested_collection)
+    unrecognized_group_command=interpretation["operation"]=="create_item" and interpretation["ambiguous"] and bool(re.match(r"^\s*create\b",transcription,re.IGNORECASE))
+    if interpretation["operation"]=="create_collection":
+        group_to_create=interpretation["arguments"]["name"];aliases=interpretation["arguments"]["aliases"]; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
+        db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
+        created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created Collection' if created else 'Collection already exists:'} {group_to_create}",group_to_create)
+        return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
+    if requested_collection and interpretation["ambiguous"]:raise ValueError("Collection not found or archived")
+    group_name=interpretation["arguments"].get("collectionName")
+    if interpretation["operation"] in {"add_to_collection","set_reminder"}:transcription=interpretation["arguments"]["text"]
     due_at=normalize_timestamp(first(payload,("due_at","dueAt"),None))
     notify_before=first(payload,("reminder_notify_before_minutes","reminderNotifyBeforeMinutes"),None)
-    if reminder and not due_at:
-        transcription=reminder["text"]; due_at=reminder["due_at"]; notify_before=reminder.get("notify_before_minutes"); category="task"
+    if interpretation["operation"]=="set_reminder" and not due_at:
+        due_at=interpretation["arguments"]["dueAt"]; notify_before=interpretation["arguments"].get("notifyBeforeMinutes"); category="task"
     try:notify_before=max(1,min(int(notify_before),10080)) if notify_before not in (None,"") else None
     except (TypeError,ValueError):notify_before=None
     audio_path=audio_mime=None
@@ -882,6 +933,15 @@ def manual():
         result=store_entry(payload,upload,"manual"); return jsonify(ok=True,**result),(201 if result["created"] else 200)
     except Exception as error:
         log_activity("error","ingest_error","A manual capture could not be stored",str(error)); return jsonify(error="Manual capture failed"),500
+
+@app.post("/api/interpret")
+@api_auth
+def interpret_dry_run():
+    body=request.get_json(silent=True) or {}; reference=None
+    if body.get("referenceAt"):
+        try:reference=datetime.fromisoformat(str(body["referenceAt"]).replace("Z","+00:00"))
+        except ValueError:return jsonify(error="Invalid reference time"),400
+    return jsonify(interpret_capture(body.get("text",""),reference,body.get("collectionName",body.get("groupName",""))))
 
 @app.get("/api/activity")
 @api_auth
