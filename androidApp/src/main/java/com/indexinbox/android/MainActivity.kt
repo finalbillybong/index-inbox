@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -469,8 +470,8 @@ class IndexViewModel(
         val server=auth.serverUrl?:return; val token=auth.token?:return
         viewModelScope.launch { busy {
             val api=ApiFactory.create(server,token)
-            _serverStatus.value=api.status()
-            _devices.value=api.devices()
+            _serverStatus.value=runCatching{api.status()}.getOrNull()
+            _devices.value=runCatching{api.devices()}.getOrDefault(emptyList())
             _appUpdate.value=runCatching{api.androidUpdate()}.getOrNull()
             _indexRingIntegration.value=runCatching{api.indexRingIntegration()}.getOrNull()
         } }
@@ -995,6 +996,20 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
     LaunchedEffect(state.error) {
         state.error?.let { snackbar.showSnackbar(it); viewModel.clearError() }
     }
+    fun closeCapture() {
+        val widgetAudio=SharedCapture.audioPath!=null
+        SharedCapture.text="";SharedCapture.audioPath=null;SharedCapture.status="";SharedCapture.category="note"
+        if(widgetAudio)CaptureWidgetState.set(viewModel.getApplication(),"ready")
+        viewModel.showCapture(false)
+    }
+    BackHandler(enabled=state.authenticated&&(state.captureOpen||state.selected!=null||state.screen!="inbox")) {
+        when {
+            state.captureOpen -> closeCapture()
+            state.selected!=null -> viewModel.select(null)
+            state.screen in setOf("timeline","aliases","suggestions") -> viewModel.showScreen("groups")
+            else -> viewModel.showScreen("inbox")
+        }
+    }
     when {
         !state.authenticated -> LoginScreen(state.loading,state.error,effectiveDark,viewModel::setThemeMode,viewModel::login)
         state.screen == "groups" -> GroupsScreen(
@@ -1043,6 +1058,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             widgetCaptureMode=state.widgetCaptureMode,
             widgetCaptureCategory=state.widgetCaptureCategory,
             widgetRecordingSeconds=state.widgetRecordingSeconds,
+            themeMode=state.themeMode,
             onBack={viewModel.showScreen("inbox")},
             onBackup=viewModel::createBackup,
             onRetention=viewModel::runRetention,
@@ -1058,6 +1074,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onWidgetCaptureMode=viewModel::setWidgetCaptureMode,
             onWidgetCaptureCategory=viewModel::setWidgetCaptureCategory,
             onWidgetRecordingSeconds=viewModel::setWidgetRecordingSeconds,
+            onThemeMode=viewModel::setThemeMode,
             onRevokeOthers=viewModel::revokeOtherDevices,
             onCheckUpdate=viewModel::checkForUpdate,
             onInstallUpdate=viewModel::installUpdate,
@@ -1080,12 +1097,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             initialStatus = SharedCapture.status,
             initialCategory = SharedCapture.category,
             loading = state.loading,
-            onClose = {
-                val widgetAudio = SharedCapture.audioPath != null
-                SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"
-                if (widgetAudio) CaptureWidgetState.set(viewModel.getApplication(), "ready")
-                viewModel.showCapture(false)
-            },
+            onClose = ::closeCapture,
             onSave = { title, text, category -> SharedCapture.text = ""; SharedCapture.audioPath = null; SharedCapture.status = ""; SharedCapture.category = "note"; viewModel.capture(text, title,category) },
             onSaveAudio = { title, text, category, file ->
                 val widgetAudio = SharedCapture.audioPath != null
@@ -1116,9 +1128,6 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onSelect = viewModel::select,
             onCapture = { viewModel.showCapture(true) },
             onLogout = viewModel::logout,
-            darkMode = effectiveDark,
-            themeMode = state.themeMode,
-            onThemeMode = viewModel::setThemeMode,
             filter = state.inboxFilter,
             onFilter = viewModel::setFilter,
             categoryFilter = state.categoryFilter,
@@ -1182,9 +1191,6 @@ private fun InboxScreen(
     onSelect: (Entry) -> Unit,
     onCapture: () -> Unit,
     onLogout: () -> Unit,
-    darkMode: Boolean,
-    themeMode: String,
-    onThemeMode: (String) -> Unit,
     filter: String,
     onFilter: (String) -> Unit,
     categoryFilter: String,
@@ -1243,14 +1249,6 @@ private fun InboxScreen(
                             DropdownMenuItem(text={Text("Settings")},leadingIcon={Icon(Icons.Default.Storage,null)},onClick={menuExpanded=false;onStatus()})
                             DropdownMenuItem(text={Text("Pending captures${if(pendingCount>0)" ($pendingCount)" else ""}")},leadingIcon={Icon(Icons.Default.CloudQueue,null)},onClick={menuExpanded=false;onPending()})
                             HorizontalDivider()
-                            Text("Theme",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
-                            listOf("system" to "Follow system","light" to "Light","dark" to "Dark").forEach { (mode,label) ->
-                                DropdownMenuItem(
-                                    text={Text(label)},
-                                    leadingIcon={if(themeMode==mode)Icon(Icons.Default.Check,null)},
-                                    onClick={menuExpanded=false;onThemeMode(mode)},
-                                )
-                            }
                             DropdownMenuItem(text={Text("Refresh")},leadingIcon={Icon(Icons.Default.Refresh,null)},enabled=!loading,onClick={menuExpanded=false;onRefresh()})
                             DropdownMenuItem(text={Text("Sign out")},leadingIcon={Icon(Icons.Default.Close,null)},onClick={menuExpanded=false;onLogout()})
                         }
@@ -1813,6 +1811,7 @@ private fun StatusScreen(
     widgetCaptureMode: String,
     widgetCaptureCategory: String,
     widgetRecordingSeconds:Int,
+    themeMode:String,
     onBack: () -> Unit,
     onBackup: () -> Unit,
     onRetention: (Int) -> Unit,
@@ -1828,6 +1827,7 @@ private fun StatusScreen(
     onWidgetCaptureMode: (String) -> Unit,
     onWidgetCaptureCategory: (String) -> Unit,
     onWidgetRecordingSeconds:(Int)->Unit,
+    onThemeMode:(String)->Unit,
     onRevokeOthers: () -> Unit,
     onCheckUpdate: () -> Unit,
     onInstallUpdate: () -> Unit,
@@ -1887,53 +1887,12 @@ private fun StatusScreen(
             navigationIcon={IconButton(onClick=onBack){Icon(Icons.AutoMirrored.Filled.ArrowBack,"Back")}},
         )
     }) { padding ->
-        if(status==null) Box(Modifier.fillMaxSize().padding(padding),contentAlignment=Alignment.Center){
-            Text(if(loading)"Loading server status…" else "Status unavailable.")
-        } else Column(Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
-            Text("${status.entries} entries",style=MaterialTheme.typography.headlineSmall,fontWeight=FontWeight.Bold)
-            Text("${status.audioEntries} with audio • ${formatBytes(status.audioBytes)} audio")
-            Text("${formatBytes(status.databaseBytes)} database")
-            HorizontalDivider()
-            Text("Transcription",fontWeight=FontWeight.Bold)
-            Text(if(status.transcriptionEnabled)"Enabled • ${status.transcriptionModel}" else "Disabled")
-            HorizontalDivider()
-            Text("Index Ring integration",fontWeight=FontWeight.Bold)
-            Text("Add this URL and the X-Webhook-Secret header to the Index webhook in the Pebble app.")
-            Text(indexRingIntegration?.webhookUrl ?: "Integration details unavailable",style=MaterialTheme.typography.bodySmall)
-            OutlinedButton(
-                onClick={indexRingIntegration?.webhookUrl?.let{clipboard.setText(AnnotatedString(it))}},
-                enabled=indexRingIntegration!=null,
-            ){Text("Copy webhook URL")}
-            Text(indexRingSecret ?: indexRingIntegration?.maskedSecret.orEmpty(),style=MaterialTheme.typography.bodySmall)
+        Column(Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(14.dp)) {
+            Text("Appearance",fontWeight=FontWeight.Bold)
             FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick={integrationAction="reveal"},enabled=indexRingIntegration?.configured==true){Text("Reveal")}
-                OutlinedButton(onClick={indexRingSecret?.let{clipboard.setText(AnnotatedString(it))}},enabled=!indexRingSecret.isNullOrBlank()){Text("Copy secret")}
-                OutlinedButton(onClick=onTestIndexRing,enabled=!indexRingSecret.isNullOrBlank()){Text("Test")}
-                OutlinedButton(onClick={integrationAction="rotate"},enabled=indexRingIntegration!=null){Text("Rotate")}
-            }
-            HorizontalDivider()
-            Text("App updates",fontWeight=FontWeight.Bold)
-            Text("Installed: ${BuildConfig.VERSION_NAME}")
-            if(appUpdate?.available==true) {
-                Text("Server release: ${appUpdate.versionName} • ${formatBytes(appUpdate.bytes)}")
-            } else Text("No self-hosted release configured",color=MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick=onCheckUpdate,enabled=!loading){Text("Check")}
-                if(appUpdate?.available==true&&appUpdate.versionCode>BuildConfig.VERSION_CODE) {
-                    Button(onClick=onInstallUpdate,enabled=!loading){
-                        Text(updateDownloadProgress?.let{"Downloading $it%"} ?: "Download & install")
-                    }
+                listOf("system" to "Follow system","light" to "Light","dark" to "Dark").forEach { (mode,label) ->
+                    FilterChip(selected=themeMode==mode,onClick={onThemeMode(mode)},label={Text(label)})
                 }
-            }
-            updateDownloadProgress?.let { progress ->
-                LinearProgressIndicator(
-                    progress={progress/100f},
-                    modifier=Modifier.fillMaxWidth(),
-                )
-                Text(
-                    if(progress<100)"Downloading update… $progress%" else "Download complete. Verifying installer…",
-                    style=MaterialTheme.typography.labelSmall,
-                )
             }
             HorizontalDivider()
             Text("Notifications",fontWeight=FontWeight.Bold)
@@ -2038,6 +1997,33 @@ private fun StatusScreen(
                 }
             }
             HorizontalDivider()
+            Text("Server & transcription",fontWeight=FontWeight.Bold)
+            if(status==null) {
+                Text(if(loading)"Loading server information…" else "Server information is currently unavailable. Local settings above still work.",color=MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text("${status.entries} entries • ${status.audioEntries} with audio")
+                Text("${formatBytes(status.audioBytes)} audio • ${formatBytes(status.databaseBytes)} database",style=MaterialTheme.typography.bodySmall)
+                Text(
+                    if(status.transcriptionEnabled)"Transcription enabled • model ${status.transcriptionModel}" else "Transcription disabled",
+                )
+                Text("The transcription model is configured on the self-hosted server, not on this phone.",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            HorizontalDivider()
+            Text("Index Ring integration",fontWeight=FontWeight.Bold)
+            Text("Add this URL and the X-Webhook-Secret header to the Index webhook in the Pebble app.")
+            Text(indexRingIntegration?.webhookUrl ?: "Integration details unavailable",style=MaterialTheme.typography.bodySmall)
+            OutlinedButton(
+                onClick={indexRingIntegration?.webhookUrl?.let{clipboard.setText(AnnotatedString(it))}},
+                enabled=indexRingIntegration!=null,
+            ){Text("Copy webhook URL")}
+            Text(indexRingSecret ?: indexRingIntegration?.maskedSecret.orEmpty(),style=MaterialTheme.typography.bodySmall)
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick={integrationAction="reveal"},enabled=indexRingIntegration?.configured==true){Text("Reveal")}
+                OutlinedButton(onClick={indexRingSecret?.let{clipboard.setText(AnnotatedString(it))}},enabled=!indexRingSecret.isNullOrBlank()){Text("Copy secret")}
+                OutlinedButton(onClick=onTestIndexRing,enabled=!indexRingSecret.isNullOrBlank()){Text("Test")}
+                OutlinedButton(onClick={integrationAction="rotate"},enabled=indexRingIntegration!=null){Text("Rotate")}
+            }
+            HorizontalDivider()
             Text("Signed-in devices",fontWeight=FontWeight.Bold)
             devices.forEach { device ->
                 Text("${device.deviceName}${if(device.current)" • this device" else ""}\nLast used ${formatDate(device.lastSeenAt)}")
@@ -2045,13 +2031,13 @@ private fun StatusScreen(
             OutlinedButton(onClick=onRevokeOthers,enabled=!loading&&devices.any{!it.current}){Text("Revoke other devices")}
             HorizontalDivider()
             Text("Verified backups",fontWeight=FontWeight.Bold)
-            Text(status.latestVerifiedBackup?.let{"Latest: ${it.archiveName} • ${formatDate(it.completedAt ?: it.requestedAt)}"} ?: "No verified backup available")
-            Button(onClick=onBackup,enabled=!loading){Text(if(loading)"Working…" else "Create verified backup")}
+            Text(status?.latestVerifiedBackup?.let{"Latest: ${it.archiveName} • ${formatDate(it.completedAt ?: it.requestedAt)}"} ?: if(status==null)"Backup status unavailable" else "No verified backup available")
+            Button(onClick=onBackup,enabled=!loading&&status!=null){Text(if(loading)"Working…" else "Create verified backup")}
             OutlinedButton(
-                onClick={backupDownload.launch(status.latestVerifiedBackup?.archiveName ?: "index-inbox-backup.zip")},
-                enabled=!loading&&status.latestVerifiedBackup!=null,
+                onClick={backupDownload.launch(status?.latestVerifiedBackup?.archiveName ?: "index-inbox-backup.zip")},
+                enabled=!loading&&status?.latestVerifiedBackup!=null,
             ){Text("Download latest verified backup")}
-            if(status.lastBackupHook) OutlinedButton(onClick=onBackupHook,enabled=!loading){Text("Trigger external backup hook")}
+            if(status?.lastBackupHook==true) OutlinedButton(onClick=onBackupHook,enabled=!loading){Text("Trigger external backup hook")}
             HorizontalDivider()
             Text("Export all entries",fontWeight=FontWeight.Bold)
             FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -2062,6 +2048,27 @@ private fun StatusScreen(
             HorizontalDivider()
             Text("Maintenance",fontWeight=FontWeight.Bold)
             OutlinedButton(onClick={retentionDialog=true},enabled=!loading){Text("Remove old audio…")}
+            HorizontalDivider()
+            Text("App updates",fontWeight=FontWeight.Bold)
+            Text("Installed: ${BuildConfig.VERSION_NAME}")
+            if(appUpdate?.available==true) {
+                Text("Server release: ${appUpdate.versionName} • ${formatBytes(appUpdate.bytes)}")
+            } else Text("No self-hosted release configured",color=MaterialTheme.colorScheme.onSurfaceVariant)
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick=onCheckUpdate,enabled=!loading){Text("Check")}
+                if(appUpdate?.available==true&&appUpdate.versionCode>BuildConfig.VERSION_CODE) {
+                    Button(onClick=onInstallUpdate,enabled=!loading){
+                        Text(updateDownloadProgress?.let{"Downloading $it%"} ?: "Download & install")
+                    }
+                }
+            }
+            updateDownloadProgress?.let { progress ->
+                LinearProgressIndicator(progress={progress/100f},modifier=Modifier.fillMaxWidth())
+                Text(
+                    if(progress<100)"Downloading update… $progress%" else "Download complete. Verifying installer…",
+                    style=MaterialTheme.typography.labelSmall,
+                )
+            }
         }
     }
 }
