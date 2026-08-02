@@ -208,6 +208,8 @@ class IndexViewModel(
     val indexRingSecret: StateFlow<String?> = _indexRingSecret
     private val _automation = MutableStateFlow<AutomationSettings?>(null)
     val automation:StateFlow<AutomationSettings?> = _automation
+    private val _interpretationModel = MutableStateFlow<InterpretationModelSettings?>(null)
+    val interpretationModel:StateFlow<InterpretationModelSettings?> = _interpretationModel
 
     init {
         if (auth.token != null) {
@@ -508,12 +510,23 @@ class IndexViewModel(
             _appUpdate.value=runCatching{api.androidUpdate()}.getOrNull()
             _indexRingIntegration.value=runCatching{api.indexRingIntegration()}.getOrNull()
             _automation.value=runCatching{api.automation()}.getOrNull()
+            _interpretationModel.value=runCatching{api.interpretationModel()}.getOrNull()
         } }
     }
 
     fun setAutomation(enabled:Boolean) {
         val server=auth.serverUrl?:return;val token=auth.token?:return
         viewModelScope.launch { busy { _automation.value=ApiFactory.create(server,token).updateAutomation(AutomationUpdate(enabled)) } }
+    }
+
+    fun setInterpretationModel(enabled:Boolean) {
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy { _interpretationModel.value=ApiFactory.create(server,token).updateInterpretationModel(InterpretationModelUpdate(enabled)) } }
+    }
+
+    fun testInterpretationModel() {
+        val server=auth.serverUrl?:return;val token=auth.token?:return
+        viewModelScope.launch { busy { _interpretationModel.value=ApiFactory.create(server,token).testInterpretationModel() } }
     }
 
     fun revealIndexRingSecret(password:String) {
@@ -1034,6 +1047,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
     val indexRingIntegration by viewModel.indexRingIntegration.collectAsState()
     val indexRingSecret by viewModel.indexRingSecret.collectAsState()
     val automation by viewModel.automation.collectAsState()
+    val interpretationModel by viewModel.interpretationModel.collectAsState()
     val pending by viewModel.pendingCaptures.collectAsState()
     val snackbar = remember { SnackbarHostState() }
     val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -1098,6 +1112,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             indexRingIntegration=indexRingIntegration,
             indexRingSecret=indexRingSecret,
             automation=automation,
+            interpretationModel=interpretationModel,
             notificationsEnabled=state.notificationsEnabled,
             instantNotifications=state.instantNotifications,
             notificationPreview=state.notificationPreview,
@@ -1133,6 +1148,8 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onRotateIndexRing=viewModel::rotateIndexRingSecret,
             onTestIndexRing=viewModel::testIndexRing,
             onAutomation=viewModel::setAutomation,
+            onInterpretationModel=viewModel::setInterpretationModel,
+            onTestInterpretationModel=viewModel::testInterpretationModel,
         )
         state.screen == "activity" -> ActivityScreen(activity,state.loading,{viewModel.showScreen("inbox")},viewModel::confirmOperation,viewModel::undoOperation)
         state.screen == "pending" -> PendingCapturesScreen(
@@ -1882,6 +1899,7 @@ private fun StatusScreen(
     indexRingIntegration: IndexRingIntegration?,
     indexRingSecret: String?,
     automation:AutomationSettings?,
+    interpretationModel:InterpretationModelSettings?,
     notificationsEnabled: Boolean,
     instantNotifications: Boolean,
     notificationPreview:Boolean,
@@ -1917,6 +1935,8 @@ private fun StatusScreen(
     onRotateIndexRing: (String) -> Unit,
     onTestIndexRing: () -> Unit,
     onAutomation:(Boolean)->Unit,
+    onInterpretationModel:(Boolean)->Unit,
+    onTestInterpretationModel:()->Unit,
 ) {
     var retentionDialog by remember { mutableStateOf(false) }
     var days by remember { mutableStateOf("30") }
@@ -1987,6 +2007,17 @@ private fun StatusScreen(
                 Switch(checked=automation?.enabled==true,onCheckedChange=onAutomation,enabled=automation!=null&&!loading)
             }
             automation?.let { Text("Allowed: ${it.operations.joinToString { operation -> operation.replace('_',' ') }} • threshold ${"%.2f".format(it.threshold)}",style=MaterialTheme.typography.labelSmall) }
+            HorizontalDivider()
+            Text("Self-hosted interpretation model",fontWeight=FontWeight.Bold)
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Propose operations for deterministic misses")
+                    Text(interpretationModel?.let { if(it.configured)"${it.name} • ${it.state}" else "Not configured on this server" } ?: "Loading model status…",style=MaterialTheme.typography.labelSmall)
+                }
+                Switch(checked=interpretationModel?.enabled==true,onCheckedChange=onInterpretationModel,enabled=interpretationModel?.configured==true&&!loading)
+            }
+            interpretationModel?.let { Text("${it.message} Proposals always require confirmation and never execute directly.",style=MaterialTheme.typography.labelSmall) }
+            OutlinedButton(onClick=onTestInterpretationModel,enabled=interpretationModel?.configured==true&&!loading){Text("Test connection")}
             HorizontalDivider()
             Text("Notifications",fontWeight=FontWeight.Bold)
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {

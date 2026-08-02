@@ -90,6 +90,15 @@ interface IndexApi {
     @PATCH("api/automation")
     suspend fun updateAutomation(@Body update:AutomationUpdate):AutomationSettings
 
+    @GET("api/model")
+    suspend fun interpretationModel():InterpretationModelSettings
+
+    @PATCH("api/model")
+    suspend fun updateInterpretationModel(@Body update:InterpretationModelUpdate):InterpretationModelSettings
+
+    @POST("api/model/test")
+    suspend fun testInterpretationModel():InterpretationModelSettings
+
     @POST("api/operations/{id}/undo")
     suspend fun undoOperation(@Path("id") id:String):UndoOperationResult
 

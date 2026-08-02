@@ -61,4 +61,17 @@ class InterpretationContractTest {
         val queued=PendingCapture("id","","Create List","note",null,1L,"","auto")
         assertEquals("auto",queued.interpretationAction)
     }
+
+    @Test
+    fun selfHostedModelStatusDecodesWithSafeDefaults() {
+        val settings=Json.decodeFromString<InterpretationModelSettings>("""{
+          "enabled":true,"configured":true,"name":"qwen3:4b",
+          "url":"http://interpretation-model:11434","timeoutSeconds":8,
+          "state":"available","message":"Connected.","checkedAt":"2026-08-02T18:00:00Z"
+        }""")
+        assertTrue(settings.enabled)
+        assertTrue(settings.configured)
+        assertEquals("available",settings.state)
+        assertEquals(8,settings.timeoutSeconds)
+    }
 }
