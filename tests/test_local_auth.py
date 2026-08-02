@@ -676,6 +676,69 @@ class LocalAuthTests(unittest.TestCase):
         events=self.client.get("/api/activity").json
         self.assertTrue(any(event["kind"]=="capture_grouped" and event["details"]==entry_id for event in events))
 
+    def test_item_completion_and_collection_api_are_additive(self):
+        webhook={"X-Webhook-Secret":"test-webhook-secret"}
+        self.client.post("/webhook/index",json={"transcription":"Create Additive 52"},headers=webhook)
+        capture=self.client.post("/webhook/index",json={
+            "id":"additive-item-52",
+            "transcription":"standalone before assignment",
+            "dueAt":"2026-08-05T09:00:00Z",
+        },headers=webhook)
+        login=self.device_login();headers={"Authorization":f"Bearer {login.json['token']}"}
+        initial=self.client.get("/api/changes",headers=headers).json["sequence"]
+        assigned=self.client.patch(f"/api/items/{capture.json['id']}",json={
+            "collection_name":"ADDITIVE52",
+            "completed":True,
+        },headers=headers)
+        self.assertEqual(assigned.status_code,200)
+
+        item=next(row for row in self.client.get("/api/items?collection_name=ADDITIVE52&completed=1",headers=headers).json["items"] if row["id"]==capture.json["id"])
+        self.assertEqual(item["collection_name"],"ADDITIVE52")
+        self.assertEqual(item["group_name"],"ADDITIVE52")
+        self.assertEqual((item["completed"],item["processed"],item["reminder_completed"]),(1,0,0))
+        legacy=next(row for row in self.client.get("/api/entries?group_name=ADDITIVE52",headers=headers).json["items"] if row["id"]==capture.json["id"])
+        self.assertEqual(legacy["group_name"],"ADDITIVE52")
+        self.assertNotIn("collection_name",legacy)
+        self.assertTrue(any(row["name"]=="ADDITIVE52" for row in self.client.get("/api/collections",headers=headers).json))
+
+        changes=self.client.get(f"/api/changes?since={initial}",headers=headers).json["events"]
+        self.assertEqual([event["kind"] for event in changes],["collection_changed","item_completed"])
+        exported=json.loads(self.client.get("/api/collections/ADDITIVE52/export/json",headers=headers).data)
+        self.assertEqual((exported[0]["collection_name"],exported[0]["completed"]),("ADDITIVE52",1))
+        markdown=self.client.get("/api/collections/ADDITIVE52/export/markdown",headers=headers).text
+        self.assertIn("Collection: ADDITIVE52",markdown)
+        self.assertIn("Completed: yes",markdown)
+
+    def test_phase_two_migration_preserves_legacy_database_and_is_retryable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"legacy.sqlite3"
+            connection=self.module.sqlite3.connect(path)
+            connection.executescript("""
+              CREATE TABLE entries (id TEXT PRIMARY KEY,created_at TEXT NOT NULL,recorded_at TEXT,
+                transcription TEXT NOT NULL DEFAULT '',trigger_type TEXT,audio_path TEXT,audio_mime TEXT,
+                payload_json TEXT NOT NULL,starred INTEGER NOT NULL DEFAULT 0,processed INTEGER NOT NULL DEFAULT 0,
+                tags TEXT NOT NULL DEFAULT '',title TEXT NOT NULL DEFAULT '',category TEXT NOT NULL DEFAULT 'note',
+                archived INTEGER NOT NULL DEFAULT 0,source_key TEXT,group_name TEXT,due_at TEXT,
+                reminder_completed INTEGER NOT NULL DEFAULT 0,reminder_notify_before_minutes INTEGER);
+              CREATE TABLE note_groups (name TEXT PRIMARY KEY COLLATE NOCASE,display_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,archived INTEGER NOT NULL DEFAULT 0);
+            """)
+            values=("legacy-1","2026-01-01T10:00:00Z","2026-01-01T09:59:00Z","legacy text","ring","legacy.webm","audio/webm",'{"legacy":true}',1,1,"old","Legacy","task",0,"stable-source","LEGACY7","2026-01-02T08:00:00Z",1,30)
+            connection.execute("INSERT INTO entries VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",values)
+            connection.execute("INSERT INTO note_groups VALUES('LEGACY7','LEGACY7','2025-12-01T00:00:00Z',0)")
+            connection.commit();connection.close()
+
+            self.module.init_db(path)
+            self.module.init_db(path)
+            migrated=self.module.sqlite3.connect(path);migrated.row_factory=self.module.sqlite3.Row
+            row=migrated.execute("SELECT * FROM entries WHERE id='legacy-1'").fetchone()
+            self.assertEqual(tuple(row[key] for key in ("id","created_at","recorded_at","audio_path","group_name","due_at","reminder_completed","processed")),("legacy-1","2026-01-01T10:00:00Z","2026-01-01T09:59:00Z","legacy.webm","LEGACY7","2026-01-02T08:00:00Z",1,1))
+            self.assertEqual(row["completed"],0)
+            self.assertEqual(migrated.execute("PRAGMA user_version").fetchone()[0],2)
+            legacy_reader=migrated.execute("SELECT id,group_name,due_at,processed,reminder_completed FROM entries").fetchone()
+            self.assertEqual(tuple(legacy_reader),("legacy-1","LEGACY7","2026-01-02T08:00:00Z",1,1))
+            migrated.close()
+
     def test_group_timeline_and_exports_reject_unknown_group(self):
         self.login()
         self.assertEqual(self.client.get("/api/groups/UNKNOWN999/timeline").status_code,404)

@@ -23,9 +23,11 @@ class EntryCompatibilityTest {
         assertEquals("legacy-entry",entry.id)
         assertEquals("Existing note",entry.transcription)
         assertEquals(1,entry.processed)
+        assertEquals(0,entry.completed)
         assertEquals("note",entry.category)
         assertEquals(0,entry.archived)
         assertNull(entry.groupName)
+        assertNull(entry.collectionName)
         assertNull(entry.dueAt)
         assertEquals(0,entry.reminderCompleted)
     }
