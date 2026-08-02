@@ -305,6 +305,7 @@ class WidgetCaptureUploadWorker(context: Context, params: WorkerParameters) : Co
             category = auth.widgetCaptureCategory,
             audioPath = file.absolutePath,
             createdAt = System.currentTimeMillis(),
+            interpretationAction = "auto",
         )
         val api=ApiFactory.create(server, token)
         return try {

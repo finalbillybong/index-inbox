@@ -590,6 +590,50 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(row["transcription"],"Create a collection with spaces")
         self.assertIsNone(row["group_name"])
 
+    def test_safe_automation_setting_policy_receipts_idempotency_and_undo(self):
+        login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        initial=self.client.get("/api/automation",headers=headers)
+        self.assertEqual(initial.status_code,200);self.assertFalse(initial.json["enabled"])
+        self.assertEqual(initial.json["threshold"],0.95)
+        self.assertEqual(set(initial.json["operations"]),{"create_collection","add_to_collection","set_reminder"})
+
+        capture={"id":"phase-six-disabled-auto","transcription":"Create Safety sixty six","interpretationAction":"auto"}
+        disabled=self.client.post("/api/manual",json=capture,headers=headers)
+        self.assertEqual(disabled.status_code,201);self.assertEqual(disabled.json["operationOutcome"],"saved_plain_safely")
+        receipt_id=disabled.json["operationReceiptId"]
+        with self.module.app.app_context():
+            self.assertIsNone(self.module.find_group("SAFETY66"))
+            self.assertIsNotNone(self.module.db().execute("SELECT id FROM entries WHERE id=?",(disabled.json["id"],)).fetchone())
+
+        duplicate=self.client.post("/api/manual",json=capture,headers=headers)
+        self.assertEqual(duplicate.status_code,200);self.assertTrue(duplicate.json["duplicate"]);self.assertEqual(duplicate.json["operationReceiptId"],receipt_id)
+        undone=self.client.post(f"/api/operations/{receipt_id}/undo",headers=headers)
+        self.assertEqual(undone.status_code,200)
+        self.assertEqual(self.client.post(f"/api/operations/{receipt_id}/undo",headers=headers).status_code,409)
+        activity=self.client.get("/api/activity",headers=headers).json
+        original=next(row for row in activity if receipt_id in row["details"])
+        self.assertFalse(json.loads(original["details"])["reversible"])
+
+        enabled=self.client.patch("/api/automation",json={"enabled":True},headers=headers)
+        self.assertTrue(enabled.json["enabled"])
+        command={"id":"phase-six-enabled-auto","transcription":"Create Safety sixty seven","interpretationAction":"auto"}
+        executed=self.client.post("/api/manual",json=command,headers=headers)
+        self.assertEqual(executed.status_code,201);self.assertEqual(executed.json["operationOutcome"],"executed")
+        with self.module.app.app_context():self.assertIsNotNone(self.module.find_group("SAFETY67"))
+        self.assertEqual(self.client.post(f"/api/operations/{executed.json['operationReceiptId']}/undo",headers=headers).status_code,200)
+        with self.module.app.app_context():self.assertIsNone(self.module.find_group("SAFETY67"))
+
+    def test_automation_never_executes_completion_or_ambiguous_commands(self):
+        login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        self.client.patch("/api/automation",json={"enabled":True},headers=headers)
+        with self.module.app.app_context():
+            self.module.db().execute("INSERT INTO entries(id,created_at,transcription,payload_json,title,category) VALUES(?,?,?,?,?,?)",("never-auto-complete",self.module.now(),"buy tea","{}","Tea","task"));self.module.db().commit()
+        completion=self.client.post("/api/manual",json={"id":"auto-completion","transcription":"Complete Tea","interpretationAction":"auto"},headers=headers)
+        ambiguous=self.client.post("/api/manual",json={"id":"auto-ambiguous","transcription":"Create a collection with spaces","interpretationAction":"auto"},headers=headers)
+        self.assertEqual(completion.json["operationOutcome"],"saved_plain_safely")
+        self.assertEqual(ambiguous.json["operationOutcome"],"saved_plain_safely")
+        with self.module.app.app_context():self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='never-auto-complete'").fetchone()[0],0)
+
     def test_natural_spoken_number_group_aliases(self):
         headers={"X-Webhook-Secret": "test-webhook-secret"}
         created=self.client.post("/webhook/index",json={"transcription":"Create Example sixty 5."},headers=headers)

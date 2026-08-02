@@ -55,7 +55,7 @@ _TRANSCRIPTION_LOCK = threading.Lock()
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
 CAPTURE_EVENT_KINDS = {"capture_standalone", "capture_grouped", "group_created", "group_exists",
   "group_unrecognized", "webhook_rejected", "ingest_error", "item_completed", "item_reopened",
-  "collection_changed"}
+  "collection_changed", "interpreted_operation", "interpreted_operation_undone"}
 DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True); BACKUP_DIR.mkdir(parents=True,exist_ok=True); TRANSCRIPTION_MODEL_DIR.mkdir(parents=True,exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
 if AUTH_PROVIDER == "firebase" and PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
@@ -101,6 +101,9 @@ def init_db(path=DB_PATH):
       CREATE TABLE IF NOT EXISTS backup_runs (id TEXT PRIMARY KEY,requested_at TEXT NOT NULL,completed_at TEXT,
         status TEXT NOT NULL,archive_name TEXT,archive_bytes INTEGER,error TEXT NOT NULL DEFAULT '');
       CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS interpreted_operations (id TEXT PRIMARY KEY,created_at TEXT NOT NULL,source TEXT NOT NULL,
+        source_key TEXT UNIQUE,operation TEXT NOT NULL,confidence REAL NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,
+        target_id TEXT,result_json TEXT NOT NULL,undo_kind TEXT,undo_payload TEXT,reversed_at TEXT);
     """)
     con.execute("BEGIN IMMEDIATE")
     columns = {r[1] for r in con.execute("PRAGMA table_info(entries)")}
@@ -122,6 +125,35 @@ init_db()
 def now(): return datetime.now(timezone.utc).isoformat()
 def log_activity(level, kind, message, details=""):
     db().execute("INSERT INTO activity(created_at,level,kind,message,details) VALUES(?,?,?,?,?)", (now(),level,kind,message,details)); db().commit()
+
+def setting_bool(key,default=False):
+    row=db().execute("SELECT value FROM app_settings WHERE key=?",(key,)).fetchone()
+    return (row["value"].lower()=="true") if row else bool(default)
+
+def set_setting_bool(key,value):
+    db().execute("INSERT INTO app_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",(key,"true" if value else "false",now()));db().commit()
+
+AUTO_EXECUTION_THRESHOLD=0.95
+AUTO_EXECUTION_OPERATIONS={"create_collection","add_to_collection","set_reminder"}
+
+def automatic_execution_policy(interpretation):
+    operation=interpretation["operation"]
+    if interpretation["ambiguous"]:return False,"Ambiguous proposals are never executed automatically."
+    if interpretation["requiresConfirmation"]:return False,"This operation always requires confirmation."
+    if operation not in AUTO_EXECUTION_OPERATIONS:return False,"This operation is not on the non-destructive automatic allowlist."
+    if interpretation["confidence"]<AUTO_EXECUTION_THRESHOLD:return False,f"Confidence is below the {AUTO_EXECUTION_THRESHOLD:.2f} automatic threshold."
+    return True,f"Deterministic {operation} matched at {interpretation['confidence']:.2f}, meeting the {AUTO_EXECUTION_THRESHOLD:.2f} non-destructive threshold."
+
+def interpretation_with_policy(interpretation):
+    allowed,reason=automatic_execution_policy(interpretation)
+    return {**interpretation,"autoExecutable":allowed,"autoExecutionReason":reason,"autoExecutionEnabled":setting_bool("automatic_execution",False)}
+
+def operation_receipt(source,source_key,interpretation,reason,result,undo_kind=None,undo_payload=None,status="executed"):
+    receipt_id=str(uuid.uuid4());details={"receiptId":receipt_id,"operation":interpretation["operation"],"outcome":status,"reversible":bool(undo_kind),"reason":reason,"confidence":interpretation["confidence"]}
+    db().execute("""INSERT INTO interpreted_operations(id,created_at,source,source_key,operation,confidence,reason,status,target_id,result_json,undo_kind,undo_payload)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",(receipt_id,now(),source,source_key,interpretation["operation"],interpretation["confidence"],reason,status,result.get("id") or result.get("group"),json.dumps(result),undo_kind,json.dumps(undo_payload or {})));db().commit()
+    log_activity("info","interpreted_operation",f"{interpretation['operation'].replace('_',' ').capitalize()}: {status}",json.dumps(details))
+    return {**result,"operationReceiptId":receipt_id,"operationOutcome":status,"operationReversible":bool(undo_kind)}
 
 def request_origin_allowed():
     origin=request.headers.get("Origin")
@@ -596,6 +628,12 @@ def existing_source_entry(payload,source):
     source_key=hashlib.sha256(f"{source}:{external_id}".encode()).hexdigest()
     return db().execute("SELECT id FROM entries WHERE source_key=?",(source_key,)).fetchone()
 
+def existing_operation_receipt(payload,source):
+    external_id=first(payload,("id","recordingId","recording_id","uuid","eventId"),"")
+    if not external_id:return None
+    source_key=hashlib.sha256(f"{source}:{external_id}".encode()).hexdigest()
+    return db().execute("SELECT id,result_json,status,undo_kind FROM interpreted_operations WHERE source_key=?",(source_key,)).fetchone()
+
 def store_entry(payload, upload=None, source="ring"):
     entry_id = str(uuid.uuid4()); recorded = normalize_timestamp(first(payload,("recorded_at","recordedAt","timestamp","created_at"),None))
     transcription = first(payload,("transcription","transcript","text","content","note")); trigger = first(payload,("trigger","trigger_type","triggerType","mode","click_type"),source)
@@ -603,6 +641,10 @@ def store_entry(payload, upload=None, source="ring"):
     basis = external_id or (json.dumps(payload,sort_keys=True,separators=(",",":")) if recorded else "")
     source_key = hashlib.sha256(f"{source}:{basis}".encode()).hexdigest() if basis else None
     if source_key:
+        receipt=db().execute("SELECT id,result_json,status,undo_kind FROM interpreted_operations WHERE source_key=?",(source_key,)).fetchone()
+        if receipt:
+            result=json.loads(receipt["result_json"]);log_activity("info","duplicate","Duplicate interpreted operation ignored",result.get("id") or result.get("group") or "")
+            return {**result,"created":False,"duplicate":True,"operationReceiptId":receipt["id"],"operationOutcome":receipt["status"],"operationReversible":bool(receipt["undo_kind"])}
         existing = db().execute("SELECT id FROM entries WHERE source_key=?",(source_key,)).fetchone()
         if existing: log_activity("info","duplicate","Duplicate webhook ignored",existing["id"]); return {"id":existing["id"],"created":False,"duplicate":True}
     title=first(payload,("title",),""); explicit_category=first(payload,("category",),"")
@@ -615,9 +657,15 @@ def store_entry(payload, upload=None, source="ring"):
         except ValueError:pass
     requested_collection=first(payload,("collection_name","collectionName","group_name","groupName"),"")
     interpretation_action=str(first(payload,("interpretationAction","interpretation_action"),"")).strip().lower()
-    if interpretation_action not in {"","accept","confirm","plain"}:raise ValueError("Invalid interpretation action")
+    if interpretation_action not in {"","accept","confirm","plain","auto"}:raise ValueError("Invalid interpretation action")
     interpretation=(interpretation_result("create_item",{"text":transcription},1.0,"Save as a plain Item.")
       if interpretation_action=="plain" else interpret_capture(transcription,reminder_reference,requested_collection))
+    proposed_interpretation=interpretation;receipt_reason=interpretation["explanation"];receipt_status="executed"
+    if interpretation_action=="auto":
+        allowed,policy_reason=automatic_execution_policy(interpretation);enabled=setting_bool("automatic_execution",False);receipt_reason=policy_reason
+        if not (enabled and allowed):
+            receipt_status="saved_plain_safely"
+            interpretation=interpretation_result("create_item",{"text":transcription},1.0,"Automatic execution was not allowed; saved as a plain Item.")
     if source=="manual" and interpretation_action and interpretation["requiresConfirmation"] and interpretation_action!="confirm":
         error=ValueError("Confirm the proposed operation or save as a plain Item")
         error.interpretation=interpretation
@@ -633,14 +681,16 @@ def store_entry(payload, upload=None, source="ring"):
         group_to_create=interpretation["arguments"]["name"];aliases=interpretation["arguments"]["aliases"]; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
         db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
         created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created Collection' if created else 'Collection already exists:'} {group_to_create}",group_to_create)
-        return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
+        result={"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
+        return operation_receipt(source,source_key,proposed_interpretation,receipt_reason,result,"remove_collection" if created else None,{"name":group_to_create}) if interpretation_action else result
     if interpretation["operation"]=="complete_item":
         item_id=interpretation["arguments"].get("itemId")
         if not item_id:raise ValueError("Choose one matching Item before completing it")
         cursor=db().execute("UPDATE entries SET completed=1 WHERE id=? AND archived=0 AND completed=0",(item_id,));db().commit()
         if not cursor.rowcount:raise ValueError("The matching Item is no longer available")
         log_activity("info","item_completed",f"Completed Item matching {interpretation['arguments']['query']}",item_id)
-        return {"id":item_id,"created":False,"duplicate":False,"operation":"complete_item"}
+        result={"id":item_id,"created":False,"duplicate":False,"operation":"complete_item"}
+        return operation_receipt(source,source_key,proposed_interpretation,receipt_reason,result,"reopen_item",{"id":item_id})
     if requested_collection and interpretation["ambiguous"]:raise ValueError("Collection not found or archived")
     group_name=interpretation["arguments"].get("collectionName")
     if interpretation["operation"] in {"add_to_collection","set_reminder"}:transcription=interpretation["arguments"]["text"]
@@ -661,7 +711,10 @@ def store_entry(payload, upload=None, source="ring"):
         log_activity("info","capture_grouped",f"Added an Item to {group_name}",entry_id)
     else:
         log_activity("info","capture_standalone","Added a standalone Item",entry_id)
-    return {"id":entry_id,"created":True,"duplicate":False,"group":group_name}
+    result={"id":entry_id,"created":True,"duplicate":False,"group":group_name}
+    if interpretation_action=="auto" or (interpretation_action and proposed_interpretation["operation"]!="create_item"):
+        return operation_receipt(source,source_key,proposed_interpretation,receipt_reason,result,"remove_item",{"id":entry_id},receipt_status)
+    return result
 
 @app.get("/health")
 def health():
@@ -945,6 +998,10 @@ def transcribe():
 def manual():
     try:
         payload=payload_from_request(); upload=next((request.files[k] for k in request.files if request.files[k].filename),None)
+        receipt=existing_operation_receipt(payload,"manual")
+        if receipt:
+            result=json.loads(receipt["result_json"]);log_activity("info","duplicate","Duplicate interpreted operation ignored",result.get("id") or result.get("group") or "")
+            return jsonify({"ok":True,**result,"created":False,"duplicate":True,"operationReceiptId":receipt["id"],"operationOutcome":receipt["status"],"operationReversible":bool(receipt["undo_kind"])}),200
         existing=existing_source_entry(payload,"manual")
         if existing:
             log_activity("info","duplicate","Duplicate manual capture ignored",existing["id"])
@@ -965,11 +1022,58 @@ def interpret_dry_run():
     if body.get("referenceAt"):
         try:reference=datetime.fromisoformat(str(body["referenceAt"]).replace("Z","+00:00"))
         except ValueError:return jsonify(error="Invalid reference time"),400
-    return jsonify(interpret_capture(body.get("text",""),reference,body.get("collectionName",body.get("groupName",""))))
+    return jsonify(interpretation_with_policy(interpret_capture(body.get("text",""),reference,body.get("collectionName",body.get("groupName","")))))
 
 @app.get("/api/activity")
 @api_auth
-def activity(): return jsonify([dict(r) for r in db().execute("SELECT * FROM activity ORDER BY id DESC LIMIT 100")])
+def activity():
+    rows=[dict(r) for r in db().execute("SELECT * FROM activity ORDER BY id DESC LIMIT 100")]
+    for row in rows:
+        try:details=json.loads(row["details"] or "{}")
+        except (TypeError,json.JSONDecodeError):continue
+        receipt_id=details.get("receiptId")
+        if receipt_id and details.get("reversible"):
+            receipt=db().execute("SELECT reversed_at,undo_kind FROM interpreted_operations WHERE id=?",(receipt_id,)).fetchone()
+            details["reversible"]=bool(receipt and receipt["undo_kind"] and not receipt["reversed_at"]);row["details"]=json.dumps(details)
+    return jsonify(rows)
+
+@app.get("/api/automation")
+@api_auth
+def automation_settings():
+    return jsonify(enabled=setting_bool("automatic_execution",False),threshold=AUTO_EXECUTION_THRESHOLD,
+      operations=sorted(AUTO_EXECUTION_OPERATIONS),safety="Only deterministic, non-destructive, single-match operations can run automatically.")
+
+@app.patch("/api/automation")
+@api_auth
+def update_automation_settings():
+    body=request.get_json(silent=True) or {}
+    if not isinstance(body.get("enabled"),bool):return jsonify(error="enabled must be true or false"),400
+    set_setting_bool("automatic_execution",body["enabled"])
+    log_activity("info","automation_setting",f"Automatic execution {'enabled' if body['enabled'] else 'disabled'}")
+    return automation_settings()
+
+@app.post("/api/operations/<receipt_id>/undo")
+@api_auth
+def undo_interpreted_operation(receipt_id):
+    receipt=db().execute("SELECT * FROM interpreted_operations WHERE id=?",(receipt_id,)).fetchone()
+    if not receipt:return jsonify(error="Operation receipt not found"),404
+    if receipt["reversed_at"]:return jsonify(error="Operation has already been undone"),409
+    payload=json.loads(receipt["undo_payload"] or "{}");kind=receipt["undo_kind"]
+    if not kind:return jsonify(error="This operation cannot be undone"),409
+    if kind=="remove_item":
+        if not remove_entry(payload.get("id","")):return jsonify(error="The created Item is no longer available"),409
+    elif kind=="reopen_item":
+        cursor=db().execute("UPDATE entries SET completed=0 WHERE id=? AND completed=1",(payload.get("id"),));db().commit()
+        if not cursor.rowcount:return jsonify(error="The completed Item is no longer available to reopen"),409
+    elif kind=="remove_collection":
+        group=find_group(payload.get("name",""))
+        if not group:return jsonify(error="The created Collection no longer exists"),409
+        if db().execute("SELECT 1 FROM entries WHERE group_name=? LIMIT 1",(group["name"],)).fetchone():return jsonify(error="The Collection now contains Items and cannot be removed automatically"),409
+        db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(group["name"],));db().execute("DELETE FROM note_groups WHERE name=?",(normalized_group_name(group["name"]),));db().commit()
+    else:return jsonify(error="Unknown recovery action"),409
+    reversed=now();db().execute("UPDATE interpreted_operations SET status='undone',reversed_at=? WHERE id=?",(reversed,receipt_id));db().commit()
+    log_activity("info","interpreted_operation_undone",f"Undid {receipt['operation'].replace('_',' ')}",json.dumps({"receiptId":receipt_id,"operation":receipt["operation"],"outcome":"undone","reversible":False}))
+    return jsonify(ok=True,receiptId=receipt_id,status="undone")
 
 @app.get("/api/changes")
 @api_auth

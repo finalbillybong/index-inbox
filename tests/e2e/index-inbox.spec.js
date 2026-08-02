@@ -39,7 +39,7 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.4.0');
+    await expect(page.locator('.version')).toHaveText('v1.5.0');
   });
 
   test('login and live webhook refresh', async ({ page, request }) => {
@@ -287,13 +287,30 @@ test.describe('Index Inbox browser flows', () => {
     await expect(page.locator('header')).toHaveCSS('min-height', '64px');
     await openMenu(page, '#status-open');
     await expect(page.locator('.settings-screen')).toBeVisible();
-    await expect(page.locator('.settings-section h3')).toHaveText(['Appearance','Notifications','Server & transcription','Index Ring integration','Verified backups','Export all entries','Maintenance']);
+    await expect(page.locator('.settings-section h3')).toHaveText(['Appearance','Capture automation','Notifications','Server & transcription','Index Ring integration','Verified backups','Export all Items','Maintenance']);
+    await page.locator('#automatic-execution').check();
+    await expect(page.locator('#automatic-execution')).toBeChecked();
     await page.locator('#theme-mode').selectOption('light');
     await expect(page.locator('html')).toHaveAttribute('data-theme','light');
     const buttons = page.locator('.settings-screen button');
     await expect(buttons).toHaveCount(9);
     const boxes = await buttons.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect()).map(({ top, bottom, left, right }) => ({ top, bottom, left, right })));
     for (let i = 1; i < boxes.length; i += 1) expect(boxes[i].top).toBeGreaterThanOrEqual(boxes[i - 1].bottom);
+  });
+
+  test('interpreted operation appears in activity and can be undone', async ({ page }) => {
+    await login(page);
+    await page.locator('#capture').click();
+    await page.locator('#manual-text').fill('Create Browser eighty eight');
+    await expect(page.locator('#operation-title')).toHaveText('Create a Collection');
+    await page.locator('#capture-save').click();
+    await expect(page.locator('#capture-dialog')).toBeHidden();
+    await openMenu(page,'#activity-open');
+    const operation=page.locator('.activity-row').filter({hasText:'Create collection: executed'}).first();
+    await expect(operation.getByRole('button',{name:'Undo'})).toBeVisible();
+    await operation.getByRole('button',{name:'Undo'}).click();
+    await expect(page.locator('.activity-row').filter({hasText:'Undid create collection'}).first()).toBeVisible();
+    await expect(page.locator('.activity-row').filter({hasText:'Create collection: executed'}).first().getByRole('button',{name:'Undo'})).toBeHidden();
   });
 
   test('mobile Back closes capture before leaving the inbox', async ({ page }) => {
