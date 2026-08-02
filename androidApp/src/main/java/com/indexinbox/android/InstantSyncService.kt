@@ -130,7 +130,7 @@ object NotificationCenter {
         .setSmallIcon(R.drawable.ic_notification)
         .setColor(0xFFFFCA48.toInt())
         .setContentTitle("Index Inbox connected")
-        .setContentText("Listening for new notes on your server")
+        .setContentText("Listening for new Items on your server")
         .setOngoing(true)
         .setContentIntent(launchIntent(context))
         .build()
@@ -144,9 +144,9 @@ object NotificationCenter {
         val auth=AuthStore(context)
         val quiet=auth.quietHoursEnabled&&isQuietHour(ZonedDateTime.now().hour,auth.quietHoursStart,auth.quietHoursEnd)
         val title = when (event.kind) {
-            "capture_standalone" -> "Note received"
-            "capture_grouped" -> "Grouped note received"
-            "group_created" -> "Group created"
+            "capture_standalone" -> "Item received"
+            "capture_grouped" -> "Collection Item received"
+            "group_created" -> "Collection created"
             "webhook_rejected", "ingest_error" -> "Index Inbox needs attention"
             else -> "Index Inbox"
         }
@@ -317,4 +317,4 @@ class NotificationActionWorker(context:Context,params:WorkerParameters):Coroutin
 
 internal fun notificationBody(entry:Entry?,eventMessage:String):String =
     entry?.transcription?.trim().takeUnless{it.isNullOrBlank()}
-        ?: if(entry?.audioPath!=null)"Audio note received. Transcription may still be processing." else eventMessage
+        ?: if(entry?.audioPath!=null)"Audio Item received. Transcription may still be processing." else eventMessage

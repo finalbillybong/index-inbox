@@ -559,7 +559,7 @@ def store_entry(payload, upload=None, source="ring"):
     if group_command:
         group_to_create,aliases=group_command; cursor=db().execute("INSERT OR IGNORE INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(group_to_create,group_to_create,now()))
         db().executemany("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",((alias,group_to_create) for alias in aliases)); db().commit()
-        created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created group' if created else 'Group already exists:'} {group_to_create}",group_to_create)
+        created=bool(cursor.rowcount); log_activity("info","group_created" if created else "group_exists",f"{'Created Collection' if created else 'Collection already exists:'} {group_to_create}",group_to_create)
         return {"group":group_to_create,"groupCreated":created,"created":created,"duplicate":not created}
     group_name,transcription=match_note_group(transcription)
     requested_collection=first(payload,("collection_name","collectionName","group_name","groupName"),"")
@@ -585,11 +585,11 @@ def store_entry(payload, upload=None, source="ring"):
     db().execute("""INSERT INTO entries(id,created_at,recorded_at,transcription,trigger_type,audio_path,audio_mime,payload_json,source_key,title,category,group_name,due_at,reminder_notify_before_minutes)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(entry_id,now(),recorded,transcription,trigger,audio_path,audio_mime,json.dumps(payload,ensure_ascii=False),source_key,title,category,group_name,due_at,notify_before)); db().commit()
     if unrecognized_group_command:
-        log_activity("warning","group_unrecognized","Could not create a group from that command",entry_id)
+        log_activity("warning","group_unrecognized","Could not create a Collection from that command",entry_id)
     elif group_name:
-        log_activity("info","capture_grouped",f"Added a note to {group_name}",entry_id)
+        log_activity("info","capture_grouped",f"Added an Item to {group_name}",entry_id)
     else:
-        log_activity("info","capture_standalone","Added a standalone note",entry_id)
+        log_activity("info","capture_standalone","Added a standalone Item",entry_id)
     return {"id":entry_id,"created":True,"duplicate":False,"group":group_name}
 
 @app.get("/health")
@@ -613,18 +613,31 @@ def ingest():
 def groups():return jsonify([dict(row) for row in db().execute("""SELECT g.display_name AS name,g.created_at,g.archived,count(e.id) AS entries
   FROM note_groups g LEFT JOIN entries e ON e.group_name=g.display_name GROUP BY g.name ORDER BY g.archived,g.display_name""")])
 
+@app.post("/api/collections")
+@api_auth
+def create_collection():
+    name=normalized_group_name((request.get_json(silent=True) or {}).get("name",""))
+    if not name:return jsonify(error="Collection names must be 1-32 letters, numbers, hyphens or underscores"),400
+    created=now()
+    try:
+        db().execute("INSERT INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(name,name,created))
+        db().execute("INSERT INTO note_group_aliases(alias,group_name) VALUES(?,?)",(name.lower(),name));db().commit()
+    except sqlite3.IntegrityError:return jsonify(error="A Collection with that name already exists"),409
+    log_activity("info","collection_changed",f"Created Collection {name}",name)
+    return jsonify(name=name,created_at=created,archived=0,entries=0),201
+
 @app.patch("/api/groups/<name>")
 @app.patch("/api/collections/<name>")
 @api_auth
 def update_group(name):
     current=normalized_group_name(name); body=request.get_json(force=True); connection=db()
     row=connection.execute("SELECT * FROM note_groups WHERE name=?",(current,)).fetchone() if current else None
-    if not row:return jsonify(error="Group not found"),404
+    if not row:return jsonify(error="Collection not found"),404
     target=current; renamed=False
     if "name" in body:
         target=normalized_group_name(body["name"])
-        if not target:return jsonify(error="Group names must be 1-32 letters, numbers, hyphens or underscores"),400
-        if target!=current and connection.execute("SELECT 1 FROM note_groups WHERE name=?",(target,)).fetchone():return jsonify(error="A group with that name already exists"),409
+        if not target:return jsonify(error="Collection names must be 1-32 letters, numbers, hyphens or underscores"),400
+        if target!=current and connection.execute("SELECT 1 FROM note_groups WHERE name=?",(target,)).fetchone():return jsonify(error="A Collection with that name already exists"),409
         alias_owner=connection.execute("SELECT group_name FROM note_group_aliases WHERE alias=?",(target.lower(),)).fetchone()
         if alias_owner and alias_owner["group_name"].lower()!=row["display_name"].lower():return jsonify(error="That name conflicts with another group's alias"),409
     if "archived" in body and not isinstance(body["archived"],bool):return jsonify(error="archived must be true or false"),400
@@ -639,9 +652,9 @@ def update_group(name):
             connection.execute("UPDATE note_groups SET name=?,display_name=? WHERE name=?",(target,target,current))
             connection.execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) VALUES(?,?)",(target.lower(),target)); renamed=True
         connection.execute("UPDATE note_groups SET archived=? WHERE name=?",(archived,target)); connection.commit()
-    except sqlite3.IntegrityError:connection.rollback(); return jsonify(error="Group name or alias conflicts with an existing group"),409
-    if renamed:log_activity("info","group",f"Renamed group {row['display_name']} to {target}",target)
-    if archived!=row["archived"]:log_activity("info","group",f"{'Archived' if archived else 'Reopened'} group {target}",target)
+    except sqlite3.IntegrityError:connection.rollback(); return jsonify(error="Collection name or alias conflicts with an existing Collection"),409
+    if renamed:log_activity("info","collection_changed",f"Renamed Collection {row['display_name']} to {target}",target)
+    if archived!=row["archived"]:log_activity("info","collection_changed",f"{'Archived' if archived else 'Reopened'} Collection {target}",target)
     return jsonify(ok=True,name=target,archived=bool(archived))
 
 @app.get("/api/groups/<name>/aliases")
@@ -688,7 +701,7 @@ def delete_group(name):
     count=db().execute("SELECT count(*) FROM entries WHERE group_name=?",(row["display_name"],)).fetchone()[0]
     if count and request.args.get("ungroup")!="true":return jsonify(error="Group contains entries",entries=count),409
     db().execute("UPDATE entries SET group_name=NULL WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_group_aliases WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM group_suggestion_dismissals WHERE group_name=?",(row["display_name"],)); db().execute("DELETE FROM note_groups WHERE name=?",(name,)); db().commit()
-    log_activity("info","group",f"Removed group {row['display_name']}; preserved {count} entries",row["display_name"]); return jsonify(ok=True,ungrouped=count)
+    log_activity("info","collection_changed",f"Removed Collection {row['display_name']}; preserved {count} Items",row["display_name"]); return jsonify(ok=True,ungrouped=count)
 
 def find_group(name):
     canonical=normalized_group_name(name)

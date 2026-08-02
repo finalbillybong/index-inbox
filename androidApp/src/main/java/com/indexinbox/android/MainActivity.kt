@@ -161,7 +161,7 @@ data class AppState(
     val widgetCaptureMode: String = "instant",
     val widgetCaptureCategory: String = "note",
     val widgetRecordingSeconds:Int = 15,
-    val syncStatus: String = "Saved notes available offline",
+    val syncStatus: String = "Saved Items available offline",
 )
 
 class IndexViewModel(
@@ -276,7 +276,7 @@ class IndexViewModel(
                 _groups.value=api.groups()
                 _state.value=_state.value.copy(syncStatus="Synced just now")
             } catch(error:Exception) {
-                _state.value=_state.value.copy(error=error.message?:"Sync failed",syncStatus="Offline — showing saved notes")
+                _state.value=_state.value.copy(error=error.message?:"Sync failed",syncStatus="Offline — showing saved Items")
             } finally {
                 _state.value=_state.value.copy(loading=false)
             }
@@ -365,6 +365,16 @@ class IndexViewModel(
     private fun loadGroups() {
         val server=auth.serverUrl?:return; val token=auth.token?:return
         viewModelScope.launch { busy { _groups.value=ApiFactory.create(server,token).groups() } }
+    }
+
+    fun createCollection(name: String) {
+        if(name.isBlank())return
+        val server=auth.serverUrl?:return; val token=auth.token?:return
+        viewModelScope.launch { busy {
+            val api=ApiFactory.create(server,token)
+            api.createCollection(CreateCollectionRequest(name.trim()))
+            _groups.value=api.groups()
+        } }
     }
 
     private fun loadActivity() {
@@ -604,7 +614,7 @@ class IndexViewModel(
     }
 
     fun downloadExport(format: String,uri: Uri) = download(uri,"Export saved") { it.export(format) }
-    fun downloadGroupExport(name: String,format: String,uri: Uri) = download(uri,"Group export saved") { it.groupExport(name,format) }
+    fun downloadGroupExport(name: String,format: String,uri: Uri) = download(uri,"Collection export saved") { it.groupExport(name,format) }
     fun downloadLatestBackup(uri: Uri) = download(uri,"Verified backup saved") { it.latestBackup() }
     fun downloadAudio(entry: Entry,uri: Uri) = download(uri,"Audio saved") { it.audioDownload(entry.id) }
 
@@ -631,7 +641,7 @@ class IndexViewModel(
     fun audioSource(entry: Entry): Pair<String, String>? {
         val server = auth.serverUrl ?: return null
         val token = auth.token ?: return null
-        return "${server}api/entries/${entry.id}/audio" to token
+        return "${server}api/items/${entry.id}/audio" to token
     }
 
     fun update(entry: Entry, update: EntryUpdate) {
@@ -663,7 +673,7 @@ class IndexViewModel(
     fun assignGroup(entry: Entry, group: String?) {
         val server=auth.serverUrl?:return; val token=auth.token?:return
         viewModelScope.launch { busy {
-            val body=buildJsonObject { put("group_name",if(group==null)JsonNull else JsonPrimitive(group)) }
+            val body=buildJsonObject { put("collection_name",if(group==null)JsonNull else JsonPrimitive(group)) }
             ApiFactory.create(server,token).assignGroup(entry.id,body)
             select(null)
             refresh()
@@ -933,6 +943,8 @@ internal fun filterInboxEntries(
         "reminders" -> it.dueAt!=null&&it.reminderCompleted==0&&it.archived==0
         "starred" -> it.starred==1&&it.archived==0
         "unprocessed" -> it.processed==0&&it.archived==0
+        "incomplete" -> it.completed==0&&it.archived==0
+        "completed" -> it.completed==1&&it.archived==0
         "archived" -> it.archived==1
         else -> it.archived==0
     }
@@ -1021,6 +1033,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onAliases = viewModel::openAliases,
             onRemove = viewModel::removeGroup,
             onSuggestions = { viewModel.showScreen("suggestions") },
+            onCreate = viewModel::createCollection,
         )
         state.screen == "timeline" -> GroupTimelineScreen(
             timeline,state.loading,
@@ -1215,8 +1228,8 @@ private fun InboxScreen(
     pendingDelete?.let { ids ->
         AlertDialog(
             onDismissRequest={pendingDelete=null},
-            title={Text("Delete ${ids.size} entries?")},
-            text={Text("This permanently removes the selected notes and their stored audio.")},
+            title={Text("Delete ${ids.size} Items?")},
+            text={Text("This permanently removes the selected Items and their stored audio.")},
             confirmButton={TextButton(onClick={onBulk(ids,"delete");selected=emptySet();pendingDelete=null}){Text("Delete all")}},
             dismissButton={TextButton(onClick={pendingDelete=null}){Text("Cancel")}},
         )
@@ -1244,7 +1257,7 @@ private fun InboxScreen(
                     Box {
                         IconButton(onClick={menuExpanded=true}){Icon(Icons.Default.Menu,"Menu")}
                         DropdownMenu(expanded=menuExpanded,onDismissRequest={menuExpanded=false}) {
-                            DropdownMenuItem(text={Text("Groups")},leadingIcon={Icon(Icons.Default.Folder,null)},onClick={menuExpanded=false;onGroups()})
+                            DropdownMenuItem(text={Text("Collections")},leadingIcon={Icon(Icons.Default.Folder,null)},onClick={menuExpanded=false;onGroups()})
                             DropdownMenuItem(text={Text("Recent activity")},leadingIcon={Icon(Icons.Default.History,null)},onClick={menuExpanded=false;onActivity()})
                             DropdownMenuItem(text={Text("Settings")},leadingIcon={Icon(Icons.Default.Storage,null)},onClick={menuExpanded=false;onStatus()})
                             DropdownMenuItem(text={Text("Pending captures${if(pendingCount>0)" ($pendingCount)" else ""}")},leadingIcon={Icon(Icons.Default.CloudQueue,null)},onClick={menuExpanded=false;onPending()})
@@ -1305,7 +1318,7 @@ private fun InboxScreen(
                 if(pendingCount>0) TextButton(onClick=onPending){Text("Review")}
             }
             Box(Modifier.padding(horizontal=16.dp,vertical=4.dp)) {
-                val stateLabel = mapOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","starred" to "Starred","archived" to "Archived")[filter] ?: "Active"
+                val stateLabel = mapOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","incomplete" to "Incomplete","completed" to "Completed","starred" to "Starred","archived" to "Archived")[filter] ?: "Active"
                 val typeLabel = mapOf("" to "All types","note" to "Notes","task" to "Tasks","idea" to "Ideas","question" to "Questions")[categoryFilter] ?: "All types"
                 OutlinedButton(onClick={filtersExpanded=true}) {
                     Icon(Icons.Default.FilterList,null)
@@ -1314,7 +1327,7 @@ private fun InboxScreen(
                 }
                 DropdownMenu(expanded=filtersExpanded,onDismissRequest={filtersExpanded=false}) {
                     Text("State",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
-                    listOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","starred" to "Starred","archived" to "Archived").forEach { (value,label) ->
+                    listOf("active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All","unprocessed" to "Unprocessed","incomplete" to "Incomplete","completed" to "Completed","starred" to "Starred","archived" to "Archived").forEach { (value,label) ->
                         DropdownMenuItem(
                             text={Text(label)},
                             leadingIcon={if(filter==value) Icon(Icons.Default.Check,null)},
@@ -1332,9 +1345,9 @@ private fun InboxScreen(
                     }
                     if(groups.isNotEmpty()) {
                         HorizontalDivider()
-                        Text("Group",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
+                        Text("Collection",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
                         DropdownMenuItem(
-                            text={Text("All groups")},
+                            text={Text("All Collections")},
                             leadingIcon={if(groupFilter.isBlank()) Icon(Icons.Default.Check,null)},
                             onClick={filtersExpanded=false;onGroupFilter("")},
                         )
@@ -1358,6 +1371,7 @@ private fun InboxScreen(
                     listOf(
                         (if(filter=="archived")"restore" to "Restore" else "archive" to "Archive"),
                         (if(filter=="unprocessed")"process" to "Process" else "unprocess" to "Unprocess"),
+                        (if(filter=="completed")"reopen" to "Reopen" else "complete" to "Complete"),
                         (if(filter=="starred")"unstar" to "Unstar" else "star" to "Star"),
                         "delete" to "Delete",
                     ).forEach { (action,label) ->
@@ -1370,7 +1384,7 @@ private fun InboxScreen(
             }
             if (visibleEntries.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(if (loading) "Syncing…" else if (query.isBlank()) "Nothing here yet." else "No matching entries.")
+                    Text(if (loading) "Syncing…" else if (query.isBlank()) "Nothing here yet." else "No matching Items.")
                 }
             } else {
                 LazyColumn {
@@ -1386,8 +1400,9 @@ private fun InboxScreen(
                             Column(Modifier.weight(1f)) {
                                 Text(entry.title.ifBlank { entry.category.uppercase() }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                                 Text(entry.transcription.ifBlank { "Audio recording" }, maxLines = 3, style = MaterialTheme.typography.bodyLarge)
+                                if(entry.completed==1)Text("✓ Completed",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary,fontWeight=FontWeight.Bold)
                                 if(entry.dueAt!=null)Text(
-                                    "${if(entry.reminderCompleted==1)"Completed" else "Reminder"} • ${reminderDate(entry.dueAt)}${entry.reminderNotifyBeforeMinutes?.let{" • ${it}m early"}.orEmpty()}",
+                                    "${if(entry.reminderCompleted==1)"Handled" else "Reminder"} • ${reminderDate(entry.dueAt)}${entry.reminderNotifyBeforeMinutes?.let{" • ${it}m early"}.orEmpty()}",
                                     style=MaterialTheme.typography.labelSmall,
                                     color=if(entry.reminderCompleted==1)MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
                                     fontWeight=FontWeight.Bold,
@@ -1432,8 +1447,8 @@ private fun EntryScreen(
     }
     if(confirmDelete) AlertDialog(
         onDismissRequest={confirmDelete=false},
-        title={Text("Delete this entry?")},
-        text={Text("This permanently removes the note and its stored audio.")},
+        title={Text("Delete this Item?")},
+        text={Text("This permanently removes the Item and its stored audio.")},
         confirmButton={TextButton(onClick={confirmDelete=false;onDelete()}){Text("Delete")}},
         dismissButton={TextButton(onClick={confirmDelete=false}){Text("Cancel")}},
     )
@@ -1448,7 +1463,7 @@ private fun EntryScreen(
     )
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Edit entry") },
+            title = { Text("Edit Item") },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             actions = {
                 IconButton(onClick=onStar,enabled=!loading){StarStateIcon(entry.starred==1)}
@@ -1495,7 +1510,7 @@ private fun EntryScreen(
                 modifier=Modifier.fillMaxWidth(),
             )
             if(entry.dueAt!=null)Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text("Completed",Modifier.weight(1f))
+                Text("Reminder handled",Modifier.weight(1f))
                 Switch(checked=entry.reminderCompleted==1,onCheckedChange={onSave(EntryUpdate(reminderCompleted=it))})
             }
             Text("Category", style = MaterialTheme.typography.labelMedium)
@@ -1504,7 +1519,7 @@ private fun EntryScreen(
                     FilterChip(selected = entry.category == category, onClick = { onSave(EntryUpdate(category = category)) }, label = { Text(category) })
                 }
             }
-            Text("Group",style=MaterialTheme.typography.labelMedium)
+            Text("Collection",style=MaterialTheme.typography.labelMedium)
             FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected=entry.groupName==null,onClick={onAssignGroup(null)},label={Text("Standalone")})
                 groups.forEach { group ->
@@ -1514,8 +1529,15 @@ private fun EntryScreen(
             Text(formatDate(entry.createdAt), style = MaterialTheme.typography.labelMedium)
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
+                    Text("Completed")
+                    Text(if(entry.completed==1)"This Item is complete" else "This Item is still open",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked=entry.completed==1,onCheckedChange={onSave(EntryUpdate(completed=it))})
+            }
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
                     Text("Processed")
-                    Text(if(entry.processed==1)"This note has been reviewed" else "This note still needs review",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(if(entry.processed==1)"This Item has been reviewed" else "This Item still needs review",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(checked=entry.processed==1,onCheckedChange={onSave(EntryUpdate(processed=it))})
             }
@@ -1600,10 +1622,20 @@ private fun GroupsScreen(
     onAliases: (String) -> Unit,
     onRemove: (NoteGroup) -> Unit,
     onSuggestions: () -> Unit,
+    onCreate: (String) -> Unit,
 ) {
     var renameGroup by remember { mutableStateOf<NoteGroup?>(null) }
     var removeGroup by remember { mutableStateOf<NoteGroup?>(null) }
     var renameValue by remember { mutableStateOf("") }
+    var createDialog by remember { mutableStateOf(false) }
+    var createValue by remember { mutableStateOf("") }
+    if(createDialog) AlertDialog(
+        onDismissRequest={createDialog=false},
+        title={Text("Create Collection")},
+        text={OutlinedTextField(createValue,{createValue=it},label={Text("Collection name")},singleLine=true)},
+        confirmButton={TextButton(onClick={onCreate(createValue);createValue="";createDialog=false},enabled=createValue.isNotBlank()){Text("Create")}},
+        dismissButton={TextButton(onClick={createDialog=false}){Text("Cancel")}},
+    )
     renameGroup?.let { group ->
         AlertDialog(
             onDismissRequest={renameGroup=null},
@@ -1617,21 +1649,24 @@ private fun GroupsScreen(
         AlertDialog(
             onDismissRequest={removeGroup=null},
             title={Text("Remove ${group.name}?")},
-            text={Text(if(group.entries>0)"Its ${group.entries} entries will be preserved as standalone notes." else "This empty group will be permanently removed.")},
-            confirmButton={TextButton(onClick={onRemove(group);removeGroup=null}){Text("Remove group")}},
+            text={Text(if(group.entries>0)"Its ${group.entries} Items will be preserved as standalone Items." else "This empty Collection will be permanently removed.")},
+            confirmButton={TextButton(onClick={onRemove(group);removeGroup=null}){Text("Remove Collection")}},
             dismissButton={TextButton(onClick={removeGroup=null}){Text("Cancel")}},
         )
     }
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text("Note groups") },
+            title = { Text("Collections") },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
-            actions = { Button(onClick = onSuggestions) { Text("Suggestions") } },
+            actions = {
+                TextButton(onClick={createDialog=true}){Text("Create")}
+                TextButton(onClick = onSuggestions) { Text("Suggestions") }
+            },
         )
     }) { padding ->
         if (groups.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                Text(if (loading) "Loading groups…" else "No groups have been created.")
+                Text(if (loading) "Loading Collections…" else "No Collections have been created.")
             }
         } else {
             LazyColumn(Modifier.padding(padding)) {
@@ -1639,7 +1674,7 @@ private fun GroupsScreen(
                     Column(Modifier.fillMaxWidth().clickable { onOpen(group.name) }.padding(18.dp)) {
                         Column {
                             Text(group.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text("${group.entries} entries${if (group.archived == 1) " • archived" else ""}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("${group.entries} ${if(group.entries==1)"Item" else "Items"}${if (group.archived == 1) " • archived" else ""}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick={renameGroup=group;renameValue=group.name}){Text("Rename")}
@@ -1677,7 +1712,7 @@ private fun GroupTimelineScreen(
     }
     Scaffold(topBar = {
         TopAppBar(
-            title = { Text(timeline?.group?.name ?: "Group timeline") },
+            title = { Text(timeline?.group?.name ?: "Collection") },
             navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back") } },
             actions={
                 TextButton(onClick={groupName?.let{markdownExport.launch("index-inbox-${it.lowercase()}.md")}}){Text("MD")}
@@ -1688,7 +1723,7 @@ private fun GroupTimelineScreen(
     }) { padding ->
         val items = timeline?.items.orEmpty()
         if (items.isEmpty()) Box(Modifier.fillMaxSize().padding(padding), contentAlignment=Alignment.Center) {
-            Text(if(loading) "Loading timeline…" else "This group has no entries.")
+            Text(if(loading) "Loading Collection…" else "This Collection has no Items.")
         } else LazyColumn(Modifier.padding(padding)) {
             items(items,key={it.id}) { entry ->
                 EditableTimelineEntry(entry,onSave,audioSource(entry))
@@ -1703,9 +1738,15 @@ private fun EditableTimelineEntry(entry: Entry,onSave: (Entry,EntryUpdate) -> Un
     var text by remember(entry.id,entry.transcription){mutableStateOf(entry.transcription)}
     var tags by remember(entry.id,entry.tags){mutableStateOf(entry.tags)}
     var category by remember(entry.id,entry.category){mutableStateOf(entry.category)}
+    var completed by remember(entry.id,entry.completed){mutableStateOf(entry.completed==1)}
+    val compact=entry.category=="task"||(entry.audioPath==null&&entry.transcription.trim().length in 1..140)
     Column(Modifier.fillMaxWidth().padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+            Text("Completed",Modifier.weight(1f))
+            Switch(completed,{completed=it})
+        }
         Text(formatDate(entry.recordedAt ?: entry.createdAt),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-        OutlinedTextField(text,{text=it},label={Text("Transcription")},modifier=Modifier.fillMaxWidth(),minLines=3)
+        OutlinedTextField(text,{text=it},label={Text("Transcription")},modifier=Modifier.fillMaxWidth(),minLines=if(compact)1 else 3)
         OutlinedTextField(tags,{tags=it},label={Text("Tags")},modifier=Modifier.fillMaxWidth())
         FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             listOf("note","task","idea","question").forEach { value ->
@@ -1713,7 +1754,7 @@ private fun EditableTimelineEntry(entry: Entry,onSave: (Entry,EntryUpdate) -> Un
             }
         }
         if(entry.audioPath!=null&&audioSource!=null)AudioPlayer(audioSource.first,audioSource.second)
-        Button(onClick={onSave(entry,EntryUpdate(transcription=text,tags=tags,category=category))}){Text("Save changes")}
+        Button(onClick={onSave(entry,EntryUpdate(transcription=text,tags=tags,category=category,completed=completed))}){Text("Save changes")}
     }
 }
 
@@ -1737,7 +1778,7 @@ private fun AliasesScreen(
     )
     Scaffold(topBar={
         TopAppBar(
-            title={Text(aliases?.let{"Aliases for ${it.group}"} ?: "Aliases")},
+            title={Text(aliases?.let{"Aliases for Collection ${it.group}"} ?: "Collection aliases")},
             navigationIcon={IconButton(onClick=onBack){Icon(Icons.AutoMirrored.Filled.ArrowBack,"Back")}},
             actions={Button(onClick={addDialog=true}){Text("Add")}},
         )
@@ -1767,7 +1808,7 @@ private fun SuggestionsScreen(
 ) {
     Scaffold(topBar = {
         TopAppBar(
-            title={Text("Suggested groups")},
+            title={Text("Suggested Collections")},
             navigationIcon={IconButton(onClick=onBack){Icon(Icons.AutoMirrored.Filled.ArrowBack,"Back")}},
         )
     }) { padding ->
@@ -1776,7 +1817,7 @@ private fun SuggestionsScreen(
         } else LazyColumn(Modifier.padding(padding)) {
             items(suggestions,key={it.entryId}) { suggestion ->
                 Column(Modifier.fillMaxWidth().padding(18.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
-                    Text("Suggested: ${suggestion.group}",fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.primary)
+                    Text("Suggested Collection: ${suggestion.group}",fontWeight=FontWeight.Bold,color=MaterialTheme.colorScheme.primary)
                     Text(suggestion.transcription)
                     Text("Heard identifier ${suggestion.candidate}",style=MaterialTheme.typography.labelSmall)
                     Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
@@ -1917,7 +1958,7 @@ private fun StatusScreen(
                 Switch(checked=instantNotifications,onCheckedChange=onInstantNotifications,enabled=notificationsEnabled)
             }
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text("Show note previews",Modifier.weight(1f))
+                Text("Show Item previews",Modifier.weight(1f))
                 Switch(checked=notificationPreview,onCheckedChange=onNotificationPreview,enabled=notificationsEnabled)
             }
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
@@ -2001,7 +2042,7 @@ private fun StatusScreen(
             if(status==null) {
                 Text(if(loading)"Loading server information…" else "Server information is currently unavailable. Local settings above still work.",color=MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                Text("${status.entries} entries • ${status.audioEntries} with audio")
+                Text("${status.entries} Items • ${status.audioEntries} with audio")
                 Text("${formatBytes(status.audioBytes)} audio • ${formatBytes(status.databaseBytes)} database",style=MaterialTheme.typography.bodySmall)
                 Text(
                     if(status.transcriptionEnabled)"Transcription enabled • model ${status.transcriptionModel}" else "Transcription disabled",
@@ -2039,7 +2080,7 @@ private fun StatusScreen(
             ){Text("Download latest verified backup")}
             if(status?.lastBackupHook==true) OutlinedButton(onClick=onBackupHook,enabled=!loading){Text("Trigger external backup hook")}
             HorizontalDivider()
-            Text("Export all entries",fontWeight=FontWeight.Bold)
+            Text("Export all Items",fontWeight=FontWeight.Bold)
             FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick={markdownExport.launch("index-inbox.md")}){Text("Markdown")}
                 OutlinedButton(onClick={jsonExport.launch("index-inbox.json")}){Text("JSON")}
@@ -2177,7 +2218,7 @@ private fun StarStateIcon(starred:Boolean) {
     val dark=MaterialTheme.colorScheme.background.luminance()<0.5f
     Icon(
         imageVector=if(starred)Icons.Default.Star else Icons.Outlined.StarBorder,
-        contentDescription=if(starred)"Unstar note" else "Star note",
+        contentDescription=if(starred)"Unstar Item" else "Star Item",
         tint=when {
             starred -> androidx.compose.ui.graphics.Color(0xFFFFCA28)
             dark -> androidx.compose.ui.graphics.Color.White

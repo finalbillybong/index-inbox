@@ -31,20 +31,20 @@ interface IndexApi {
     @POST("auth/device/logout")
     suspend fun logout(): ApiResult
 
-    @GET("api/entries")
+    @GET("api/items")
     suspend fun entries(
         @Query("page") page: Int = 1,
         @Query("limit") limit: Int = 100,
         @Query("q") query: String? = null,
     ): EntryPage
 
-    @PATCH("api/entries/{id}")
+    @PATCH("api/items/{id}")
     suspend fun update(@Path("id") id: String, @Body update: EntryUpdate): ApiResult
 
-    @PATCH("api/entries/{id}")
+    @PATCH("api/items/{id}")
     suspend fun assignGroup(@Path("id") id: String, @Body update: JsonObject): ApiResult
 
-    @DELETE("api/entries/{id}")
+    @DELETE("api/items/{id}")
     suspend fun delete(@Path("id") id: String): ApiResult
 
     @POST("api/manual")
@@ -71,40 +71,43 @@ interface IndexApi {
     @POST("api/transcribe")
     suspend fun transcribe(@Part audio: MultipartBody.Part): TranscriptionResult
 
-    @GET("api/groups")
+    @GET("api/collections")
     suspend fun groups(): List<NoteGroup>
+
+    @POST("api/collections")
+    suspend fun createCollection(@Body request: CreateCollectionRequest): NoteGroup
 
     @GET("api/activity")
     suspend fun activity(): List<ActivityItem>
 
-    @GET("api/groups/{name}/timeline")
+    @GET("api/collections/{name}/timeline")
     suspend fun groupTimeline(@Path("name") name: String): GroupTimeline
 
-    @PATCH("api/groups/{name}")
+    @PATCH("api/collections/{name}")
     suspend fun updateGroup(@Path("name") name: String, @Body update: GroupUpdate): GroupUpdateResult
 
-    @DELETE("api/groups/{name}")
+    @DELETE("api/collections/{name}")
     suspend fun deleteGroup(@Path("name") name: String, @Query("ungroup") ungroup: Boolean = true): ApiResult
 
-    @GET("api/groups/{name}/aliases")
+    @GET("api/collections/{name}/aliases")
     suspend fun groupAliases(@Path("name") name: String): GroupAliases
 
-    @POST("api/groups/{name}/aliases")
+    @POST("api/collections/{name}/aliases")
     suspend fun addAlias(@Path("name") name: String, @Body request: AliasRequest): ApiResult
 
-    @retrofit2.http.HTTP(method = "DELETE", path = "api/groups/{name}/aliases", hasBody = true)
+    @retrofit2.http.HTTP(method = "DELETE", path = "api/collections/{name}/aliases", hasBody = true)
     suspend fun removeAlias(@Path("name") name: String, @Body request: AliasRequest): ApiResult
 
-    @GET("api/group-suggestions")
+    @GET("api/collection-suggestions")
     suspend fun suggestions(): List<GroupSuggestion>
 
-    @POST("api/group-suggestions/{id}/{action}")
+    @POST("api/collection-suggestions/{id}/{action}")
     suspend fun resolveSuggestion(@Path("id") id: String, @Path("action") action: String, @Body request: SuggestionRequest): ApiResult
 
-    @POST("api/entries/bulk")
+    @POST("api/items/bulk")
     suspend fun bulk(@Body request: BulkRequest): ApiResult
 
-    @retrofit2.http.HTTP(method = "DELETE", path = "api/entries", hasBody = true)
+    @retrofit2.http.HTTP(method = "DELETE", path = "api/items", hasBody = true)
     suspend fun deleteBulk(@Body request: BulkRequest): ApiResult
 
     @GET("api/status")
@@ -121,7 +124,7 @@ interface IndexApi {
     suspend fun export(@Path("format") format: String): ResponseBody
 
     @Streaming
-    @GET("api/groups/{name}/export/{format}")
+    @GET("api/collections/{name}/export/{format}")
     suspend fun groupExport(@Path("name") name: String, @Path("format") format: String): ResponseBody
 
     @Streaming
@@ -144,7 +147,7 @@ interface IndexApi {
     suspend fun testIndexRing(@Header("X-Webhook-Secret") secret: String, @Body capture: ManualCapture): ApiResult
 
     @Streaming
-    @GET("api/entries/{id}/audio")
+    @GET("api/items/{id}/audio")
     suspend fun audioDownload(@Path("id") id: String): ResponseBody
 
     @GET("auth/devices")

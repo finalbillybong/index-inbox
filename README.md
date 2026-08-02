@@ -10,9 +10,9 @@ Index Inbox is a private, self-hosted capture and organization service for Pebbl
 - SQLite metadata and local audio storage
 - Retry deduplication and delivery activity history
 - Editable transcriptions, tags, categories, starring and archiving
-- Explicit voice-created note groups with combined presentation
-- Chronological group timelines with editing, audio, and group-scoped exports
-- Conservative, user-confirmed suggestions for near-matching group identifiers
+- Explicit voice-created Collections with combined presentation
+- Chronological Collection timelines with editing, audio, completion, and Collection-scoped exports
+- Conservative, user-confirmed suggestions for near-matching Collection identifiers
 - Automatic background refresh with live, dismissible capture notices
 - Search, filters, pagination and bulk actions
 - Original webhook payload inspection
@@ -249,13 +249,13 @@ For fully self-hosted instant notifications, the signed-in app runs a visible fo
 
 The live connection occupies one Gunicorn thread per connected Android device. The supplied Docker image runs four threads, which is appropriate for a single-user installation with one or two phones. Increase the Gunicorn thread count before connecting more devices.
 
-Native parity currently includes active/unprocessed/starred/archived filters, multi-select bulk actions, entry categories, the recent activity feed, group listing and timelines, archive/reopen controls, and conservative group-suggestion review. The server remains the source of truth and the Room cache is refreshed after native mutations.
+Native parity includes active, completed, incomplete, unprocessed, starred, and archived filters; multi-select bulk actions; Item categories; Recent Activity; Collection creation and timelines; archive/reopen controls; and conservative Collection-suggestion review. The server remains the source of truth and the Room cache is refreshed after native mutations.
 
 Native synchronization retrieves every API page and atomically reconciles the Room cache to the complete server snapshot. Notes deleted through the PWA are therefore removed from Android on the next refresh or live change event. Native deletion treats a server `404` as an already-completed delete and removes any stale local copy.
 
-The native administration surface reports entry, audio and database storage, transcription status, and the latest verified backup. It can create a new verified backup and run confirmed age-based audio retention. Group controls support rename, archive/reopen, timeline browsing, suggestion review, and spoken-alias addition/removal.
+The native administration surface reports Item, audio and database storage, transcription status, and the latest verified backup. It can create a new verified backup and run confirmed age-based audio retention. Collection controls support create, rename, archive/reopen, timeline browsing, suggestion review, and spoken-alias addition/removal.
 
-Inbox parity includes independent state, category, and group filters plus assignment between standalone notes and active groups. Manual capture supports category selection and local recording playback before save. Group timeline entries can edit transcription, tags, and category while playing authenticated audio at 0.75×, 1×, 1.5×, or 2× speed. Entry, bulk-entry, and group removal use explicit confirmation.
+Inbox parity includes independent state, category, and Collection filters plus assignment between standalone Items and active Collections. Manual capture supports category selection and local recording playback before save. Collection Items can be completed independently of reminders and short actionable Items use a compact checklist presentation. Collection timelines can edit completion, transcription, tags, and category while playing authenticated audio at 0.75×, 1×, 1.5×, or 2× speed. Item, bulk-Item, and Collection removal use explicit confirmation.
 
 Authenticated downloads stream through the native Android document picker, keeping device credentials out of browser URLs and requiring no broad storage permission. The app can save complete JSON, Markdown, and ZIP/audio exports, group-scoped exports, the latest verified backup, and individual original audio files. Configured external backup hooks can also be triggered from the storage screen.
 
@@ -408,19 +408,19 @@ Note: the blue filament worked best
 
 `Todo`, `to-do` and `reminder` map to `task`. Recordings without a recognized prefix remain `note`.
 
-## Voice note groups
+## Voice Collections
 
-Voice note groups combine related captures in the inbox without combining or overwriting their underlying records. Every addition retains its own timestamp, audio and original webhook payload.
+Collections combine related Items in the inbox without combining or overwriting their underlying records. Every Item retains its own timestamp, audio and original webhook payload.
 
-### Create and use a group
+### Create and use a Collection
 
-Create a group with a recording containing only the command:
+Create a Collection from either client, or with a recording containing only the command:
 
 ```text
 Create Project42
 ```
 
-Afterward, begin a recording with that group name:
+Afterward, begin a recording with that Collection name:
 
 ```text
 PROJECT42 first site observation
@@ -433,7 +433,7 @@ The more conversational explicit form also works:
 Add to PROJECT42: follow-up observation
 ```
 
-Group matching is case-insensitive and only occurs at the beginning of a capture, or after the explicit `Add to` phrase. A sentence such as `Ask whether PROJECT42 is complete` therefore remains a standalone note.
+Collection matching is case-insensitive and only occurs at the beginning of a capture, or after the explicit `Add to` phrase. A sentence such as `Ask whether PROJECT42 is complete` therefore remains a standalone Item.
 
 ### Spoken numbers and aliases
 
@@ -449,11 +449,11 @@ Group names may contain letters, numbers, hyphens and underscores, must be 1–3
 
 Each addition remains an independent stored entry with its original timestamp, audio and webhook payload, while the inbox presents entries from the same group together. Use the group filter to focus on one group. New webhook captures and groups appear automatically within about five seconds; automatic refresh pauses while a note is being edited or a dialog is open.
 
-The browser shows a dismissible notice when it receives a standalone note, adds a note to a group, creates a group, sees a repeated create command, cannot recognize a create command, rejects a webhook, or fails to store a capture. Notices are deduplicated by activity ID and disappear after ten seconds. They contain only a generic result and, where relevant, the canonical group name—never the note transcription or original payload.
+The browser shows a dismissible notice when it receives a standalone Item, adds an Item to a Collection, creates a Collection, sees a repeated create command, cannot recognize a create command, rejects a webhook, or fails to store a capture. Notices are deduplicated by activity ID and disappear after ten seconds. They contain only a generic result and, where relevant, the canonical Collection name—never the Item transcription or original payload.
 
-### Remove a group
+### Remove a Collection
 
-Use **Manage groups** in the web interface to remove empty or populated groups. Removing a group never deletes its entries or audio; existing additions become standalone notes after confirmation.
+Use **Collections** in the web interface to create, rename, archive, reopen, or remove Collections. Removing a Collection never deletes its Items or audio; existing additions become standalone Items after confirmation.
 
 The group manager also supports:
 
@@ -465,7 +465,7 @@ The group manager also supports:
 
 Each note card includes a group selector. Choose an active group to assign or move the note, or choose **Standalone** to remove it from its current group. Archived groups remain visible on entries already assigned to them but cannot receive new manual assignments until reopened.
 
-### Per-group exports
+### Per-Collection exports
 
 Open **Manage groups**, select **Timeline** for a group, and choose one of its export controls:
 
@@ -477,7 +477,7 @@ Exports are scoped to the selected group. Empty and archived groups remain avail
 
 ### Suggested grouping
 
-Index Inbox can suggest a group when a standalone note begins with a slightly misheard or mistyped group identifier. Open **Manage groups** and use **Review suggestions** to inspect them.
+Index Inbox can suggest a Collection when a standalone Item begins with a slightly misheard or mistyped Collection identifier. Open **Collections** and use **Review suggestions** to inspect them.
 
 Suggestions are deliberately conservative:
 
@@ -486,7 +486,7 @@ Suggestions are deliberately conservative:
 - Only a small difference in the name portion is allowed.
 - Archived groups are never suggested.
 
-For example, if `SITELOG42` exists, a standalone note beginning `SITLOG42` may be suggested for it, while `SITLOG43` will not be. Nothing moves automatically. **Accept** assigns the note and removes the proposed identifier from its transcription; **Dismiss** permanently hides that entry/group suggestion. Neither action creates or learns a spoken alias.
+For example, if `SITELOG42` exists, a standalone Item beginning `SITLOG42` may be suggested for it, while `SITLOG43` will not be. Nothing moves automatically. **Accept** assigns the Item and removes the proposed identifier from its transcription; **Dismiss** permanently hides that Item/Collection suggestion. Neither action creates or learns a spoken alias.
 
 Server administrators can also inspect groups or remove an incorrectly transcribed empty group:
 

@@ -537,6 +537,17 @@ class LocalAuthTests(unittest.TestCase):
             row=self.module.db().execute("SELECT group_name FROM entries WHERE id=?",(entry.json["id"],)).fetchone()
             self.assertIsNone(row["group_name"])
 
+    def test_collection_can_be_created_and_listed_via_canonical_api(self):
+        login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        created=self.client.post("/api/collections",json={"name":"Shopping42"},headers=headers)
+        self.assertEqual(created.status_code,201)
+        self.assertEqual(created.json["name"],"SHOPPING42")
+        self.assertEqual(created.json["entries"],0)
+        self.assertEqual(self.client.post("/api/collections",json={"name":"shopping42"},headers=headers).status_code,409)
+        collections=self.client.get("/api/collections").json
+        self.assertIn("SHOPPING42",[collection["name"] for collection in collections])
+        self.assertIn("SHOPPING42",[group["name"] for group in self.client.get("/api/groups").json])
+
     def test_group_rename_updates_entries_and_preserves_old_alias(self):
         webhook={"X-Webhook-Secret":"test-webhook-secret"}
         self.client.post("/webhook/index",json={"transcription":"Create Rename12"},headers=webhook)
