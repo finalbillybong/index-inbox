@@ -561,6 +561,21 @@ class LocalAuthTests(unittest.TestCase):
             self.assertTrue(response.json["ambiguous"])
             self.assertTrue(response.json["requiresConfirmation"])
 
+    def test_natural_shopping_list_commands_support_auto_and_accept(self):
+        login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        with self.module.app.app_context():
+            stamp=self.module.now()
+            self.module.db().execute("INSERT INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",("SHOPPING","SHOPPING",stamp))
+            self.module.db().execute("INSERT INTO note_group_aliases(alias,group_name) VALUES(?,?)",("shopping","SHOPPING"));self.module.db().commit()
+        auto=self.client.post("/api/manual",json={"transcription":"add milk to my shopping list","title":"","category":"note","recordedAt":"1785697828929","id":"f8c5b301-f19c-4c48-9dfc-3e9227c7ea3b","interpretationAction":"auto"},headers=headers)
+        accepted=self.client.post("/api/manual",json={"transcription":"Add bread to my shopping list.","title":"","category":"note","recordedAt":"1785697918115","id":"e1d8335d-9ff2-4d89-b09e-52681aa15863","interpretationAction":"accept"},headers=headers)
+        self.assertEqual((auto.status_code,accepted.status_code),(201,201))
+        with self.module.app.app_context():
+            rows=self.module.db().execute("SELECT transcription,group_name FROM entries WHERE id IN (?,?) ORDER BY transcription",(auto.json["id"],accepted.json["id"])).fetchall()
+        self.assertEqual([(row["transcription"],row["group_name"]) for row in rows],[("bread","SHOPPING"),("milk","SHOPPING")])
+        unknown=self.client.post("/api/interpret",json={"text":"Add eggs to my groceries list"},headers=headers)
+        self.assertEqual(unknown.json["operation"],"add_to_collection");self.assertTrue(unknown.json["ambiguous"]);self.assertTrue(unknown.json["requiresConfirmation"])
+
     def test_interpretation_endpoint_requires_auth_and_valid_reference_time(self):
         self.assertEqual(self.client.post("/api/interpret",json={"text":"Find milk"}).status_code,401)
         login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}

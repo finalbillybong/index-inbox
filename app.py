@@ -518,15 +518,29 @@ def create_group_command(text):
     identity=group_identity(match.group(1))
     return identity if identity[0] else None
 
+def natural_collection_add(text):
+    match=re.fullmatch(r"\s*add\s+(.+?)\s+to\s+(?:(?:my|the)\s+)?(.+?)\s*[.!?]*\s*",str(text),re.IGNORECASE|re.DOTALL)
+    if not match:return None
+    item_text=match.group(1).strip(" \t\r\n.,!?")
+    target=re.sub(r"\s+(?:list|collection)\s*$","",match.group(2).strip(" \t\r\n.,!?"),flags=re.IGNORECASE)
+    alias=normalized_group_alias(target)
+    return (alias,item_text) if alias and item_text else None
+
 def match_note_group(text):
     candidate=re.sub(r"^\s*add\s+to\s+","",text,count=1,flags=re.IGNORECASE)
     aliases=db().execute("""SELECT a.alias,g.display_name FROM note_group_aliases a JOIN note_groups g ON g.name=a.group_name
       WHERE g.archived=0 ORDER BY length(a.alias) DESC""").fetchall()
+    natural=natural_collection_add(text)
+    if natural:
+        target,item_text=natural
+        for row in aliases:
+            if normalized_group_alias(row["alias"])==target:return row["display_name"],item_text,None
+        return None,item_text,target
     for row in aliases:
         pattern=r"^\s*"+r"\s+".join(re.escape(part) for part in row["alias"].split())+r"(?:\s*[:.,-]\s*|\s+)(.+)$"
         match=re.match(pattern,candidate,re.IGNORECASE|re.DOTALL)
-        if match:return row["display_name"],match.group(1).strip()
-    return None,text
+        if match:return row["display_name"],match.group(1).strip(),None
+    return None,text,None
 
 INTERPRETATION_VERSION="1.0"
 
@@ -567,12 +581,15 @@ def interpret_capture_deterministic(text,reference=None,requested_collection="")
         query=search_match.group(1).strip().rstrip(".!?")
         return interpretation_result("search_items",{"query":query},0.96,f"Search Items for “{query}”.")
 
-    group_name,group_text=match_note_group(text)
+    group_name,group_text,unknown_collection=match_note_group(text)
     if requested_collection:
         canonical=normalized_group_name(requested_collection)
         collection=db().execute("SELECT display_name FROM note_groups WHERE name=? AND archived=0",(canonical,)).fetchone() if canonical else None
         if not collection:return interpretation_result("add_to_collection",{"text":text,"collectionName":str(requested_collection)},0.0,"The requested Collection does not exist or is archived.",True,True)
-        group_name=collection["display_name"];group_text=text
+        group_name=collection["display_name"];group_text=text;unknown_collection=None
+    if unknown_collection:
+        return interpretation_result("add_to_collection",{"text":group_text,"collectionName":unknown_collection},0.35,
+          f"No active Collection matches “{unknown_collection}”.",True,True)
     reminder=parse_reminder(group_text,reference,REMINDER_ZONE,REMINDER_CLOCK_FORMAT)
     if reminder:
         arguments={"text":reminder["text"],"dueAt":reminder["due_at"],"notifyBeforeMinutes":reminder.get("notify_before_minutes")}
