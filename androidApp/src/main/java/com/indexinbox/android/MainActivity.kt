@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+
 package com.indexinbox.android
 
 import android.Manifest
@@ -16,11 +18,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -45,6 +47,8 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Inbox
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.FilterList
@@ -58,7 +62,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -66,6 +69,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.OutlinedButton
@@ -1235,7 +1240,7 @@ private fun InboxScreen(
                         DropdownMenu(expanded=menuExpanded,onDismissRequest={menuExpanded=false}) {
                             DropdownMenuItem(text={Text("Groups")},leadingIcon={Icon(Icons.Default.Folder,null)},onClick={menuExpanded=false;onGroups()})
                             DropdownMenuItem(text={Text("Recent activity")},leadingIcon={Icon(Icons.Default.History,null)},onClick={menuExpanded=false;onActivity()})
-                            DropdownMenuItem(text={Text("Storage, backups & settings")},leadingIcon={Icon(Icons.Default.Storage,null)},onClick={menuExpanded=false;onStatus()})
+                            DropdownMenuItem(text={Text("Settings")},leadingIcon={Icon(Icons.Default.Storage,null)},onClick={menuExpanded=false;onStatus()})
                             DropdownMenuItem(text={Text("Pending captures${if(pendingCount>0)" ($pendingCount)" else ""}")},leadingIcon={Icon(Icons.Default.CloudQueue,null)},onClick={menuExpanded=false;onPending()})
                             HorizontalDivider()
                             Text("Theme",modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),fontWeight=FontWeight.Bold)
@@ -1253,7 +1258,28 @@ private fun InboxScreen(
                 },
             )
         },
-        floatingActionButton = { FloatingActionButton(onClick = onCapture) { Icon(Icons.Default.Add, "Capture") } },
+        bottomBar = {
+            NavigationBar {
+                NavigationBarItem(
+                    selected=filter!="reminders",
+                    onClick={onFilter("active")},
+                    icon={Icon(Icons.Default.Inbox,null)},
+                    label={Text("Inbox")},
+                )
+                NavigationBarItem(
+                    selected=false,
+                    onClick=onCapture,
+                    icon={Icon(Icons.Default.Add,null)},
+                    label={Text("Capture")},
+                )
+                NavigationBarItem(
+                    selected=filter=="reminders",
+                    onClick={onFilter("reminders")},
+                    icon={Icon(Icons.Default.Notifications,null)},
+                    label={Text("Reminders")},
+                )
+            }
+        },
     ) { padding ->
         Column(Modifier.padding(padding)) {
             OutlinedTextField(
@@ -1325,11 +1351,12 @@ private fun InboxScreen(
                 }
             }
             if(selected.isNotEmpty()) {
-                Row(
-                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal=16.dp,vertical=6.dp),
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(horizontal=16.dp,vertical=6.dp),
                     horizontalArrangement=Arrangement.spacedBy(8.dp),
+                    verticalArrangement=Arrangement.spacedBy(8.dp),
                 ) {
-                    Text("${selected.size} selected",modifier=Modifier.align(Alignment.CenterVertically),fontWeight=FontWeight.Bold)
+                    Text("${selected.size} selected",fontWeight=FontWeight.Bold)
                     listOf(
                         (if(filter=="archived")"restore" to "Restore" else "archive" to "Archive"),
                         (if(filter=="unprocessed")"process" to "Process" else "unprocess" to "Unprocess"),
@@ -1452,7 +1479,7 @@ private fun EntryScreen(
                 placeholder={Text("2026-08-01T09:00:00+01:00")},
                 singleLine=true,modifier=Modifier.fillMaxWidth(),
             )
-            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick={
                     dueAt=java.time.ZonedDateTime.now().plusHours(1).withSecond(0).withNano(0)
                         .format(java.time.format.DateTimeFormatter.ISO_OFFSET_DATE_TIME)
@@ -1474,13 +1501,13 @@ private fun EntryScreen(
                 Switch(checked=entry.reminderCompleted==1,onCheckedChange={onSave(EntryUpdate(reminderCompleted=it))})
             }
             Text("Category", style = MaterialTheme.typography.labelMedium)
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 listOf("note","task","idea","question").forEach { category ->
                     FilterChip(selected = entry.category == category, onClick = { onSave(EntryUpdate(category = category)) }, label = { Text(category) })
                 }
             }
             Text("Group",style=MaterialTheme.typography.labelMedium)
-            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 FilterChip(selected=entry.groupName==null,onClick={onAssignGroup(null)},label={Text("Standalone")})
                 groups.forEach { group ->
                     FilterChip(selected=entry.groupName==group.name,onClick={onAssignGroup(group.name)},label={Text(group.name)})
@@ -1536,7 +1563,7 @@ private fun AudioPlayer(url: String, token: String) {
             }
         }
     }) { Text(if (playing) "Pause audio" else "Play audio") }
-    Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(6.dp)) {
+    FlowRow(horizontalArrangement=Arrangement.spacedBy(6.dp),verticalArrangement=Arrangement.spacedBy(6.dp)) {
         listOf(.75f,1f,1.5f,2f).forEach { value ->
             FilterChip(selected=speed==value,onClick={
                 speed=value
@@ -1616,7 +1643,7 @@ private fun GroupsScreen(
                             Text(group.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text("${group.entries} entries${if (group.archived == 1) " • archived" else ""}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                        FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick={renameGroup=group;renameValue=group.name}){Text("Rename")}
                             OutlinedButton(onClick={onAliases(group.name)}){Text("Aliases")}
                             OutlinedButton(onClick = { onToggle(group) }) { Text(if(group.archived==1) "Reopen" else "Archive") }
@@ -1682,7 +1709,7 @@ private fun EditableTimelineEntry(entry: Entry,onSave: (Entry,EntryUpdate) -> Un
         Text(formatDate(entry.recordedAt ?: entry.createdAt),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
         OutlinedTextField(text,{text=it},label={Text("Transcription")},modifier=Modifier.fillMaxWidth(),minLines=3)
         OutlinedTextField(tags,{tags=it},label={Text("Tags")},modifier=Modifier.fillMaxWidth())
-        Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             listOf("note","task","idea","question").forEach { value ->
                 FilterChip(selected=category==value,onClick={category=value},label={Text(value)})
             }
@@ -1856,7 +1883,7 @@ private fun StatusScreen(
     )
     Scaffold(topBar={
         TopAppBar(
-            title={Text("Storage & backup")},
+            title={Text("Settings")},
             navigationIcon={IconButton(onClick=onBack){Icon(Icons.AutoMirrored.Filled.ArrowBack,"Back")}},
         )
     }) { padding ->
@@ -1878,7 +1905,7 @@ private fun StatusScreen(
                 enabled=indexRingIntegration!=null,
             ){Text("Copy webhook URL")}
             Text(indexRingSecret ?: indexRingIntegration?.maskedSecret.orEmpty(),style=MaterialTheme.typography.bodySmall)
-            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick={integrationAction="reveal"},enabled=indexRingIntegration?.configured==true){Text("Reveal")}
                 OutlinedButton(onClick={indexRingSecret?.let{clipboard.setText(AnnotatedString(it))}},enabled=!indexRingSecret.isNullOrBlank()){Text("Copy secret")}
                 OutlinedButton(onClick=onTestIndexRing,enabled=!indexRingSecret.isNullOrBlank()){Text("Test")}
@@ -1991,7 +2018,7 @@ private fun StatusScreen(
                 style=MaterialTheme.typography.labelSmall,
             )
             Text("Default category",fontWeight=FontWeight.Bold)
-            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 listOf("note","task","idea","question").forEach { category ->
                     FilterChip(
                         selected=widgetCaptureCategory==category,
@@ -2001,7 +2028,7 @@ private fun StatusScreen(
                 }
             }
             Text("Maximum recording length",fontWeight=FontWeight.Bold)
-            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 listOf(1,3,5,10,15).forEach { seconds ->
                     FilterChip(
                         selected=widgetRecordingSeconds==seconds,
@@ -2027,7 +2054,7 @@ private fun StatusScreen(
             if(status.lastBackupHook) OutlinedButton(onClick=onBackupHook,enabled=!loading){Text("Trigger external backup hook")}
             HorizontalDivider()
             Text("Export all entries",fontWeight=FontWeight.Bold)
-            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick={markdownExport.launch("index-inbox.md")}){Text("Markdown")}
                 OutlinedButton(onClick={jsonExport.launch("index-inbox.json")}){Text("JSON")}
                 OutlinedButton(onClick={zipExport.launch("index-inbox.zip")}){Text("ZIP + audio")}
@@ -2120,7 +2147,7 @@ private fun PendingCaptureCard(
         if(capture.audioPath!=null)Text("Audio attached",color=MaterialTheme.colorScheme.primary,fontWeight=FontWeight.Bold)
         OutlinedTextField(title,{title=it},label={Text("Title")},modifier=Modifier.fillMaxWidth())
         OutlinedTextField(text,{text=it},label={Text("Transcription")},modifier=Modifier.fillMaxWidth(),minLines=3)
-        Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
             listOf("note","task","idea","question").forEach { value ->
                 FilterChip(selected=category==value,onClick={category=value},label={Text(value)})
             }
@@ -2247,7 +2274,7 @@ private fun CaptureScreen(
         ) {
             OutlinedTextField(title, { title = it }, label = { Text("Title (optional)") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(text, { text = it }, label = { Text("What do you want to remember?") }, minLines = 9, modifier = Modifier.fillMaxWidth())
-            Row(Modifier.horizontalScroll(rememberScrollState()),horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 listOf("note","task","idea","question").forEach { value ->
                     FilterChip(selected=category==value,onClick={category=value},label={Text(value)})
                 }
