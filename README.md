@@ -497,7 +497,7 @@ docker exec -it index-inbox flask groups delete-empty
 
 ## Data and backups
 
-The server's backward-compatible Item model and Collection API aliases are documented in [`docs/phase-2-server-model.md`](docs/phase-2-server-model.md). General Item completion, inbox processing, and reminder completion are separate states. Existing Entry/Group API routes remain supported during the migration.
+The server's backward-compatible Item model and Collection API aliases are documented in [`docs/phase-2-server-model.md`](docs/phase-2-server-model.md). The versioned, non-mutating natural-language interpretation API is documented in [`docs/phase-4-interpretation-contract.md`](docs/phase-4-interpretation-contract.md). General Item completion, inbox processing, and reminder completion are separate states. Existing Entry/Group API routes remain supported during the migration.
 
 `INDEX_DATA_PATH` contains:
 
