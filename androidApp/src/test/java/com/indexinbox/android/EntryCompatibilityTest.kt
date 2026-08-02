@@ -14,7 +14,7 @@ class EntryCompatibilityTest {
           "id":"legacy-entry",
           "created_at":"2026-01-01T00:00:00Z",
           "transcription":"Existing note",
-          "payload_json":"{\\"source\\":\\"index-ring\\"}",
+          "payload_json":"{}",
           "starred":1,
           "processed":1,
           "tags":"existing"
