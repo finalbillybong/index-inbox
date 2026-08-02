@@ -48,7 +48,16 @@ test.describe('Index Inbox browser flows', () => {
     await livePoll;
     await webhook(request, 'Note browser capture arrived');
     await expect(page.locator('.capture-notice')).toContainText('Added a standalone note');
-    await expect(page.locator('#entries textarea.text')).toHaveValue('browser capture arrived');
+    const card = page.locator('.entry-card').filter({ has: page.locator('textarea.text') }).first();
+    await expect(card.locator('.summary-text')).toHaveText('browser capture arrived');
+    await expect(card.locator('.entry-details')).toBeHidden();
+    await card.locator('.entry-summary').click();
+    await expect(card.locator('.entry-details')).toBeVisible();
+    const saved = page.waitForResponse(response => response.url().includes('/api/entries/') && response.request().method() === 'PATCH');
+    await card.locator('.title').fill('Browser capture');
+    await card.locator('.title').press('Tab');
+    await saved;
+    await expect(page.locator('.summary-title').filter({ hasText: 'Browser capture' })).toBeVisible();
   });
 
   test('natural-language reminder and early alert can be completed', async ({ page, request }) => {
@@ -58,6 +67,7 @@ test.describe('Index Inbox browser flows', () => {
     const card=page.locator('.card').filter({has:page.locator('.reminder-completed:not(:disabled)')}).first();
     await expect(card).toBeVisible();
     await expect(card.locator('textarea.text')).toHaveValue('test the browser reminder');
+    await card.locator('.entry-summary').click();
     await expect(card.locator('.due-at')).not.toHaveValue('');
     await expect(card.locator('.notify-before')).toHaveValue('60');
     await card.locator('.reminder-completed').check();
@@ -76,7 +86,8 @@ test.describe('Index Inbox browser flows', () => {
 
   test('Index Ring integration reveals the webhook secret after password confirmation', async ({ page }) => {
     await login(page);
-    await openMenu(page, '#integrations-open');
+    await openMenu(page, '#status-open');
+    await page.locator('#settings-index-ring').click();
     await expect(page.locator('.index-ring-integration')).toContainText('X-Webhook-Secret');
     await expect(page.locator('#index-ring-url')).toHaveValue('http://127.0.0.1:5055/webhook/index');
     await page.getByRole('button', { name: 'Reveal' }).click();
@@ -195,14 +206,17 @@ test.describe('Index Inbox browser flows', () => {
     await expect(page.locator('#record-status')).toContainText('Transcription ready');
   });
 
-  test('mobile header and storage actions do not overlap', async ({ page }) => {
+  test('mobile Settings sections and actions do not overlap', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await login(page);
     await expect(page.locator('header')).toHaveCSS('min-height', '64px');
     await openMenu(page, '#status-open');
-    await expect(page.locator('.storage-status')).toBeVisible();
-    const buttons = page.locator('.storage-status .modal-actions button');
-    await expect(buttons).toHaveCount(8);
+    await expect(page.locator('.settings-screen')).toBeVisible();
+    await expect(page.locator('.settings-section h3')).toHaveText(['Appearance','Notifications','Server & transcription','Index Ring integration','Verified backups','Export all entries','Maintenance']);
+    await page.locator('#theme-mode').selectOption('light');
+    await expect(page.locator('html')).toHaveAttribute('data-theme','light');
+    const buttons = page.locator('.settings-screen button');
+    await expect(buttons).toHaveCount(9);
     const boxes = await buttons.evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect()).map(({ top, bottom, left, right }) => ({ top, bottom, left, right })));
     for (let i = 1; i < boxes.length; i += 1) expect(boxes[i].top).toBeGreaterThanOrEqual(boxes[i - 1].bottom);
   });
