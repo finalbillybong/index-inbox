@@ -4,12 +4,17 @@ umask 077
 
 origin="${1:-}"
 data_path="${2:-}"
+reminder_timezone="${3:-}"
 if [[ ! "$origin" =~ ^https://[^/]+(:[0-9]+)?$ ]]; then
-    echo "Usage: bash setup.sh https://index.example.com /absolute/data/path" >&2
+    echo "Usage: bash setup.sh https://index.example.com /absolute/data/path Europe/London" >&2
     exit 1
 fi
 if [[ "$data_path" != /* ]]; then
     echo "The data path must be absolute." >&2
+    exit 1
+fi
+if [[ -z "$reminder_timezone" || ( "$reminder_timezone" != "UTC" && "$reminder_timezone" != */* ) ]]; then
+    echo "Supply an IANA reminder timezone such as Europe/London (or UTC)." >&2
     exit 1
 fi
 if [[ -e .env ]]; then
@@ -29,6 +34,7 @@ setup_token="$(openssl rand -hex 32)"
     printf 'AUTH_COOKIE_SECURE=true\n'
     printf 'WEBHOOK_SECRET=%s\n' "$webhook_secret"
     printf 'LOCAL_SETUP_TOKEN=%s\n' "$setup_token"
+    printf 'REMINDER_TIMEZONE=%s\n' "$reminder_timezone"
 } > .env
 
 mkdir -p "$data_path"

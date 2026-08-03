@@ -46,6 +46,9 @@ class ReminderParserTests(unittest.TestCase):
         twelve=parse_reminder("Remind me at 7.30 to have coffee",self.reference,timezone.utc,"12")
         self.assertEqual(twelve["due_at"],"2026-01-15T19:30:00+00:00")
 
+    def test_speech_transcription_third_person_variant(self):
+        self.assert_reminder("Reminds me at 9:30pm to have a coffee","have a coffee","2026-01-15T21:30:00+00:00")
+
     def test_lead_time_is_extracted(self):
         self.assert_reminder(
             "Remind me to call the dentist tomorrow at 3pm with one hour notice",

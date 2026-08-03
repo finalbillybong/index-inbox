@@ -241,7 +241,7 @@ def _clean_action(body,spans):
 
 def parse_reminder(text,reference=None,zone=timezone.utc,clock_format="24"):
     command=re.match(
-        r"^\s*(?:remind\s+me|set\s+(?:a\s+)?reminder|(?:do\s+not|don't|dont)\s+let\s+me\s+forget|(?:do\s+not|don't|dont)\s+forget|remember)(?:\s+to)?\s+(.+?)\s*[.!]?\s*$",
+        r"^\s*(?:reminds?\s+me|set\s+(?:a\s+)?reminder|(?:do\s+not|don't|dont)\s+let\s+me\s+forget|(?:do\s+not|don't|dont)\s+forget|remember)(?:\s+to)?\s+(.+?)\s*[.!]?\s*$",
         str(text),re.IGNORECASE|re.DOTALL,
     )
     if not command:return None
