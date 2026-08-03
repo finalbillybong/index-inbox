@@ -178,6 +178,9 @@ class LocalAuthTests(unittest.TestCase):
         self.assertEqual(item["due_at"],"2026-07-31T07:30:00+00:00")
         completed=self.client.patch(f"/api/entries/{item['id']}",json={"reminder_completed":True},headers=headers)
         self.assertEqual(completed.status_code,200)
+        self.assertFalse(any(row["id"]==item["id"] for row in self.client.get("/api/entries?view=reminders",headers=headers).json["items"]))
+        finished=next(row for row in self.client.get("/api/entries?completed=1",headers=headers).json["items"] if row["id"]==item["id"])
+        self.assertEqual((finished["completed"],finished["reminder_completed"]),(1,1))
 
     def test_relative_reminder_uses_recording_time_and_persists_early_alert(self):
         login=self.device_login();headers={"Authorization":f"Bearer {login.json['token']}"}
@@ -931,7 +934,7 @@ class LocalAuthTests(unittest.TestCase):
         item=next(row for row in self.client.get("/api/items?collection_name=ADDITIVE52&completed=1",headers=headers).json["items"] if row["id"]==capture.json["id"])
         self.assertEqual(item["collection_name"],"ADDITIVE52")
         self.assertEqual(item["group_name"],"ADDITIVE52")
-        self.assertEqual((item["completed"],item["processed"],item["reminder_completed"]),(1,0,0))
+        self.assertEqual((item["completed"],item["processed"],item["reminder_completed"]),(1,0,1))
         legacy=next(row for row in self.client.get("/api/entries?group_name=ADDITIVE52",headers=headers).json["items"] if row["id"]==capture.json["id"])
         self.assertEqual(legacy["group_name"],"ADDITIVE52")
         self.assertNotIn("collection_name",legacy)
@@ -972,9 +975,9 @@ class LocalAuthTests(unittest.TestCase):
             migrated=self.module.sqlite3.connect(path);migrated.row_factory=self.module.sqlite3.Row
             row=migrated.execute("SELECT * FROM entries WHERE id='legacy-1'").fetchone()
             self.assertEqual(tuple(row[key] for key in ("id","created_at","recorded_at","audio_path","group_name","due_at","reminder_completed","processed")),("legacy-1","2026-01-01T10:00:00Z","2026-01-01T09:59:00Z","legacy.webm","LEGACY7","2026-01-02T08:00:00Z",1,1))
-            self.assertEqual(row["completed"],0)
+            self.assertEqual(row["completed"],1)
             self.assertIn("proposed_json",{column[1] for column in migrated.execute("PRAGMA table_info(interpreted_operations)")})
-            self.assertEqual(migrated.execute("PRAGMA user_version").fetchone()[0],2)
+            self.assertEqual(migrated.execute("PRAGMA user_version").fetchone()[0],3)
             legacy_reader=migrated.execute("SELECT id,group_name,due_at,processed,reminder_completed FROM entries").fetchone()
             self.assertEqual(tuple(legacy_reader),("legacy-1","LEGACY7","2026-01-02T08:00:00Z",1,1))
             migrated.close()

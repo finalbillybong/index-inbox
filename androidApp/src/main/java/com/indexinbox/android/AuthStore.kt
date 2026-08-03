@@ -23,6 +23,10 @@ class AuthStore(context: Context) {
     val notificationPreview: Boolean get() = prefs.getBoolean("notification_preview", true)
     val notificationSound: Boolean get() = prefs.getBoolean("notification_sound", true)
     val notificationVibration: Boolean get() = prefs.getBoolean("notification_vibration", true)
+    val notifyNewItems: Boolean get() = prefs.getBoolean("notify_new_items", true)
+    val notifyReminders: Boolean get() = prefs.getBoolean("notify_reminders", true)
+    val notifyCommandOutcomes: Boolean get() = prefs.getBoolean("notify_command_outcomes", true)
+    val notifyProblems: Boolean get() = prefs.getBoolean("notify_problems", true)
     val quietHoursEnabled: Boolean get() = prefs.getBoolean("quiet_hours_enabled", false)
     val quietHoursStart: Int get() = prefs.getInt("quiet_hours_start", 22).coerceIn(0,23)
     val quietHoursEnd: Int get() = prefs.getInt("quiet_hours_end", 7).coerceIn(0,23)
@@ -41,6 +45,16 @@ class AuthStore(context: Context) {
     fun setNotificationPreview(enabled: Boolean) = prefs.edit().putBoolean("notification_preview", enabled).apply()
     fun setNotificationSound(enabled: Boolean) = prefs.edit().putBoolean("notification_sound", enabled).apply()
     fun setNotificationVibration(enabled: Boolean) = prefs.edit().putBoolean("notification_vibration", enabled).apply()
+    fun setNotificationType(type:String,enabled:Boolean) {
+        val key=when(type) {
+            "items" -> "notify_new_items"
+            "reminders" -> "notify_reminders"
+            "commands" -> "notify_command_outcomes"
+            "problems" -> "notify_problems"
+            else -> return
+        }
+        prefs.edit().putBoolean(key,enabled).apply()
+    }
     fun setQuietHours(enabled:Boolean,start:Int,end:Int) = prefs.edit()
         .putBoolean("quiet_hours_enabled",enabled)
         .putInt("quiet_hours_start",start.coerceIn(0,23))

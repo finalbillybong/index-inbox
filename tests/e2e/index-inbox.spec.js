@@ -39,7 +39,7 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.8.0');
+    await expect(page.locator('.version')).toHaveText('v1.9.0');
     await openMenu(page, '#status-open');
     await page.locator('#automatic-execution').check();
     await page.keyboard.press('Escape');
@@ -67,14 +67,16 @@ test.describe('Index Inbox browser flows', () => {
     await login(page);
     await webhook(request, 'Remind me tomorrow at 3pm to test the browser reminder with one hour notice');
     await page.locator('#state').selectOption('reminders');
-    const card=page.locator('.card').filter({has:page.locator('.reminder-completed:not(:disabled)')}).first();
+    const card=page.locator('.card').filter({hasText:'test the browser reminder'}).first();
     await expect(card).toBeVisible();
     await expect(card.locator('textarea.text')).toHaveValue('test the browser reminder');
     await card.locator('.entry-summary').click();
     await expect(card.locator('.due-at')).not.toHaveValue('');
     await expect(card.locator('.notify-before')).toHaveValue('60');
-    await card.locator('.reminder-completed').check();
+    await card.locator('input.completed').check();
     await expect(card).toBeHidden();
+    await page.locator('#state').selectOption('completed');
+    await expect(page.locator('.card').filter({hasText:'test the browser reminder'})).toBeVisible();
   });
 
   test('reminder shortcuts set and remove useful due times', async ({ page, request }) => {

@@ -7,7 +7,7 @@ class InboxFilterTest {
     @Test
     fun mobileFilterPickerExposesEveryStateAndType() {
         assertEquals(
-            listOf("active","today","reminders","handled","all","unprocessed","incomplete","completed","starred","archived"),
+            listOf("active","today","reminders","all","unprocessed","incomplete","completed","starred","archived"),
             inboxStateFilters.map{it.first},
         )
         assertEquals(listOf("","note","task","idea","question"),inboxTypeFilters.map{it.first})
@@ -43,20 +43,20 @@ class InboxFilterTest {
     fun reminderFeedExcludesCompletedAndArchivedEntries() {
         val entries=listOf(
             Entry(id="due",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z"),
-            Entry(id="complete",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z",reminderCompleted=1),
+            Entry(id="complete",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z",completed=1),
             Entry(id="archived",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z",archived=1),
             Entry(id="note",createdAt="2026-01-01T00:00:00Z"),
         )
         assertEquals(listOf("due"),filterInboxEntries(entries,"","reminders","","").map{it.id})
-        assertEquals(listOf("complete"),filterInboxEntries(entries,"","handled","","").map{it.id})
+        assertEquals(listOf("complete"),filterInboxEntries(entries,"","completed","","").map{it.id})
     }
 
     @Test
-    fun openExcludesCompletedItemsAndHandledReminders() {
+    fun openExcludesEveryCompletedItemIncludingReminders() {
         val entries=listOf(
             Entry(id="open",createdAt="2026-01-01T00:00:00Z"),
             Entry(id="item-complete",createdAt="2026-01-01T00:00:00Z",completed=1),
-            Entry(id="reminder-handled",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z",reminderCompleted=1),
+            Entry(id="reminder-complete",createdAt="2026-01-01T00:00:00Z",dueAt="2099-01-01T09:00:00Z",completed=1),
         )
         assertEquals(listOf("open"),filterInboxEntries(entries,"","active","","").map{it.id})
     }
