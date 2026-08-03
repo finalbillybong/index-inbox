@@ -482,7 +482,7 @@ class LocalAuthTests(unittest.TestCase):
         webhook={"X-Webhook-Secret":"test-webhook-secret"}
         self.client.post("/webhook/index",json={"transcription":"Create Notice ninety nine"},headers=webhook)
         self.client.post("/webhook/index",json={"transcription":"Create Notice 99"},headers=webhook)
-        unmatched=self.client.post("/webhook/index",json={"transcription":"Create a group without a number"},headers=webhook)
+        unmatched=self.client.post("/webhook/index",json={"transcription":"Create !!!"},headers=webhook)
         self.assertEqual(unmatched.status_code,201)
         self.assertIsNone(unmatched.json["group"])
         events=self.client.get(f"/api/changes?since={initial}").json["events"]
@@ -553,7 +553,7 @@ class LocalAuthTests(unittest.TestCase):
 
     def test_interpretation_marks_invalid_and_ambiguous_requests_for_confirmation(self):
         login=self.login(); headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
-        invalid=self.client.post("/api/interpret",json={"text":"Create a collection with spaces"},headers=headers)
+        invalid=self.client.post("/api/interpret",json={"text":"Create !!!"},headers=headers)
         missing=self.client.post("/api/interpret",json={"text":"Complete something that does not exist"},headers=headers)
         empty=self.client.post("/api/interpret",json={"text":""},headers=headers)
         for response in (invalid,missing,empty):
@@ -624,11 +624,11 @@ class LocalAuthTests(unittest.TestCase):
         with self.module.app.app_context():
             self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='preview-complete-item'").fetchone()[0],1)
 
-        plain=self.client.post("/api/manual",json={"transcription":"Create a collection with spaces","interpretationAction":"plain"},headers=headers)
+        plain=self.client.post("/api/manual",json={"transcription":"Create !!!","interpretationAction":"plain"},headers=headers)
         self.assertEqual(plain.status_code,201)
         with self.module.app.app_context():
             row=self.module.db().execute("SELECT transcription,group_name FROM entries WHERE id=?",(plain.json["id"],)).fetchone()
-        self.assertEqual(row["transcription"],"Create a collection with spaces")
+        self.assertEqual(row["transcription"],"Create !!!")
         self.assertIsNone(row["group_name"])
 
     def test_safe_automation_setting_policy_receipts_idempotency_and_undo(self):
@@ -671,7 +671,7 @@ class LocalAuthTests(unittest.TestCase):
         with self.module.app.app_context():
             self.module.db().execute("INSERT INTO entries(id,created_at,transcription,payload_json,title,category) VALUES(?,?,?,?,?,?)",("never-auto-complete",self.module.now(),"buy tea","{}","Tea","task"));self.module.db().commit()
         completion=self.client.post("/api/manual",json={"id":"auto-completion","transcription":"Complete Tea","interpretationAction":"auto"},headers=headers)
-        ambiguous=self.client.post("/api/manual",json={"id":"auto-ambiguous","transcription":"Create a collection with spaces","interpretationAction":"auto"},headers=headers)
+        ambiguous=self.client.post("/api/manual",json={"id":"auto-ambiguous","transcription":"Create !!!","interpretationAction":"auto"},headers=headers)
         self.assertEqual(completion.json["operationOutcome"],"saved_plain_safely")
         self.assertEqual(ambiguous.json["operationOutcome"],"saved_plain_safely")
         with self.module.app.app_context():self.assertEqual(self.module.db().execute("SELECT completed FROM entries WHERE id='never-auto-complete'").fetchone()[0],0)
@@ -743,6 +743,35 @@ class LocalAuthTests(unittest.TestCase):
         collections=self.client.get("/api/collections").json
         self.assertIn("SHOPPING42",[collection["name"] for collection in collections])
         self.assertIn("SHOPPING42",[group["name"] for group in self.client.get("/api/groups").json])
+
+    def test_multi_word_collection_commands_create_and_rename_consistently(self):
+        login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        preview=self.client.post("/api/interpret",json={"text":"Create a collection called Books to Read"},headers=headers)
+        self.assertEqual(preview.json["operation"],"create_collection")
+        self.assertEqual(preview.json["arguments"]["name"],"BOOKS TO READ")
+        created=self.client.post("/api/manual",json={"transcription":"Create a collection called Books to Read","interpretationAction":"accept"},headers=headers)
+        self.assertEqual(created.status_code,201)
+        renamed=self.client.patch("/api/collections/BOOKS%20TO%20READ",json={"name":"Reading List"},headers=headers)
+        self.assertEqual(renamed.status_code,200)
+        self.assertEqual(renamed.json["name"],"READING LIST")
+        aliases=self.client.get("/api/collections/READING%20LIST/aliases",headers=headers).json["aliases"]
+        self.assertIn("books to read",aliases)
+
+    def test_accepted_search_command_is_never_stored_as_an_item(self):
+        login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        response=self.client.post("/api/manual",json={"transcription":"Find The Hobbit","interpretationAction":"accept"},headers=headers)
+        self.assertEqual(response.status_code,409)
+        with self.module.app.app_context():
+            self.assertIsNone(self.module.db().execute("SELECT id FROM entries WHERE transcription='Find The Hobbit'").fetchone())
+
+    def test_deletion_emits_a_live_change_event(self):
+        login=self.login();headers={"Origin":"http://localhost","X-CSRF-Token":login.json["csrfToken"]}
+        created=self.client.post("/api/manual",json={"transcription":"delete live audit","interpretationAction":"plain"},headers=headers)
+        baseline=self.client.get("/api/changes",headers=headers).json["sequence"]
+        self.assertEqual(self.client.delete(f"/api/items/{created.json['id']}",headers=headers).status_code,200)
+        feed=self.client.get(f"/api/changes?since={baseline}",headers=headers).json
+        event=next(row for row in feed["events"] if row["kind"]=="item_deleted")
+        self.assertEqual(event["details"],created.json["id"])
 
     def test_group_rename_updates_entries_and_preserves_old_alias(self):
         webhook={"X-Webhook-Secret":"test-webhook-secret"}

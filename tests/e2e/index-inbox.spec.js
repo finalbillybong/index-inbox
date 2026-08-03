@@ -39,7 +39,7 @@ test.describe('Index Inbox browser flows', () => {
     await page.locator('#password-confirmation').fill(password);
     await page.locator('#login-submit').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect(page.locator('.version')).toHaveText('v1.7.0');
+    await expect(page.locator('.version')).toHaveText('v1.8.0');
     await openMenu(page, '#status-open');
     await page.locator('#automatic-execution').check();
     await page.keyboard.press('Escape');
@@ -177,7 +177,6 @@ test.describe('Index Inbox browser flows', () => {
     await expect(page.locator('.group-row').filter({ hasText: 'BROWSER43' })).toBeVisible();
     await page.locator('#screen-back').click();
     await expect(page.locator('#app')).toBeVisible();
-    await expect.poll(() => page.locator('#entries textarea.text').evaluateAll(nodes => nodes.map(node => node.value))).toContain('review completed in browser');
     await page.locator('#state').selectOption('completed');
     await expect(page.locator('.entry-card.completed').filter({hasText:'review completed in browser'})).toBeVisible();
   });
@@ -268,13 +267,34 @@ test.describe('Index Inbox browser flows', () => {
   test('ambiguous capture can be corrected or saved as a plain Item', async ({ page }) => {
     await login(page);
     await page.locator('#capture').click();
-    await page.locator('#manual-text').fill('Create a collection with spaces');
+    await page.locator('#manual-text').fill('Create !!!');
     await expect(page.locator('#operation-confidence')).toHaveText('Needs correction');
     await expect(page.locator('#capture-save')).toBeDisabled();
     await expect(page.locator('#operation-confirm')).toBeHidden();
     await page.locator('#operation-plain').click();
     await expect(page.locator('#capture-dialog')).not.toBeVisible();
-    await expect(page.locator('#entries textarea.text').first()).toHaveValue('Create a collection with spaces');
+    await expect(page.locator('#entries textarea.text').first()).toHaveValue('Create !!!');
+  });
+
+  test('multi-word Collection commands and client-side search execute without command notes', async ({ page,request }) => {
+    await login(page);
+    await page.locator('#capture').click();
+    await page.locator('#manual-text').fill('Create a collection called Books to Read');
+    await expect(page.locator('#operation-title')).toHaveText('Create a Collection');
+    await page.locator('#capture-save').click();
+    await openMenu(page,'#groups-open');
+    await expect(page.locator('#screen-content')).toContainText('BOOKS TO READ');
+    await page.locator('#screen-back').click();
+
+    await webhook(request,'The Hobbit');
+    await expect(page.locator('#entries textarea.text').first()).toHaveValue('The Hobbit');
+    await page.locator('#capture').click();
+    await page.locator('#manual-text').fill('Find The Hobbit');
+    await expect(page.locator('#operation-title')).toHaveText('Search Items');
+    await page.locator('#capture-save').click();
+    await expect(page.locator('#search')).toHaveValue('The Hobbit');
+    await expect(page.locator('#entries textarea.text')).toHaveCount(1);
+    await expect(page.locator('#entries textarea.text').first()).toHaveValue('The Hobbit');
   });
 
   test('installed PWA uses the same capture preview and correction actions', async ({ page }) => {
@@ -336,6 +356,7 @@ test.describe('Index Inbox browser flows', () => {
     await pending.getByRole('button', { name: 'Confirm operation' }).click();
     await expect(pending.getByRole('button', { name: 'Confirm operation' })).toBeHidden();
     await page.locator('#screen-back').click();
+    await page.locator('#state').selectOption('completed');
     const target = page.locator('.entry-card').filter({ hasText: 'browser Ring completion target unique' }).first();
     await expect(target.locator('input.completed')).toBeChecked();
   });

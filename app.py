@@ -60,7 +60,7 @@ _INTERPRETATION_MODEL_LOCK=threading.Lock()
 VALID_CATEGORIES = {"note", "task", "idea", "question"}
 CAPTURE_EVENT_KINDS = {"capture_standalone", "capture_grouped", "group_created", "group_exists",
   "group_unrecognized", "webhook_rejected", "ingest_error", "item_completed", "item_reopened",
-  "collection_changed", "interpreted_operation", "interpreted_operation_undone"}
+  "item_deleted", "collection_changed", "interpreted_operation", "interpreted_operation_undone"}
 DATA_DIR.mkdir(parents=True, exist_ok=True); AUDIO_DIR.mkdir(parents=True, exist_ok=True); BACKUP_DIR.mkdir(parents=True,exist_ok=True); TRANSCRIPTION_MODEL_DIR.mkdir(parents=True,exist_ok=True)
 app = Flask(__name__, static_folder=None); app.config["MAX_CONTENT_LENGTH"] = MAX_AUDIO_BYTES + 1024 * 1024
 if AUTH_PROVIDER == "firebase" and PROJECT_ID and not firebase_admin._apps: firebase_admin.initialize_app(options={"projectId": PROJECT_ID})
@@ -459,8 +459,8 @@ def voice_category(text):
     return (aliases[match.group(1).lower()],match.group(2).strip()) if match else ("note",text)
 
 def normalized_group_name(value):
-    value=str(value).strip()
-    return value.upper() if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}",value) else None
+    value=re.sub(r"\s+"," ",str(value).strip().rstrip(".! "))
+    return value.upper() if 1<=len(value)<=32 and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _-]*",value) else None
 
 def normalized_group_alias(value):
     value=re.sub(r"\s+"," ",str(value).strip().rstrip(".! ")).lower()
@@ -497,23 +497,24 @@ def number_words(value):
 
 def group_identity(value):
     raw=re.sub(r"\s+"," ",str(value).strip().rstrip(".! ")).lower(); direct=normalized_group_name(raw)
-    prefix_words=[]; number=None
-    if direct:
-        match=re.fullmatch(r"([A-Za-z_-]+)(\d+)",direct)
-        if match:prefix_words=[match.group(1).lower()]; number=int(match.group(2))
-        else:return direct,{raw,direct.lower()}
-    else:
-        tokens=raw.replace("-"," ").split(); number_at=next((i for i,token in enumerate(tokens) if token.isdigit() or token in NUMBER_UNITS or token in NUMBER_TENS or token in {"hundred","thousand"}),None)
-        if number_at is None or number_at==0:return None,set()
+    prefix_words=[]; number=None;tokens=raw.replace("-"," ").split()
+    number_at=next((i for i,token in enumerate(tokens) if token.isdigit() or token in NUMBER_UNITS or token in NUMBER_TENS or token in {"hundred","thousand"}),None)
+    compact_match=re.fullmatch(r"([A-Za-z_-]+)(\d+)",direct or "")
+    if compact_match:
+        prefix_words=[compact_match.group(1).lower()];number=int(compact_match.group(2))
+    elif number_at is not None:
+        if number_at==0:return None,set()
         prefix_words=tokens[:number_at]; number=parse_spoken_number(tokens[number_at:])
         if number is None or not all(re.fullmatch(r"[a-z_]+",token) for token in prefix_words):return None,set()
         direct=normalized_group_name("".join(prefix_words)+str(number))
+    elif direct:return direct,{raw,direct.lower()}
+    else:return None,set()
     if not direct:return None,set()
     prefix=" ".join(prefix_words); digit_words=" ".join(number_words(int(digit)) for digit in str(number))
     return direct,{raw,direct.lower(),f"{prefix} {number}",f"{prefix} {number_words(number)}",f"{prefix} {digit_words}"}
 
 def create_group_command(text):
-    match=re.fullmatch(r"\s*create\s+(.+?)\s*",text,re.IGNORECASE)
+    match=re.fullmatch(r"\s*create\s+(?:(?:a\s+)?(?:list|collection)(?:\s+called)?\s+)?(.+?)\s*",text,re.IGNORECASE)
     if not match:return None
     identity=group_identity(match.group(1))
     return identity if identity[0] else None
@@ -661,7 +662,7 @@ def leading_group_candidate(text):
     best=None
     for size in range(1,min(len(tokens),8)+1):
         identity=group_identity(" ".join(tokens[:size]).rstrip(":,."))
-        if identity[0] and re.search(r"\d",identity[0]):best=(identity[0]," ".join(tokens[size:]).lstrip(":.,- "))
+        if identity[0] and re.fullmatch(r"[A-Z_-]+\d+",identity[0]):best=(identity[0]," ".join(tokens[size:]).lstrip(":.,- "))
     return best or (None,str(text))
 
 def suggested_group_for(text):
@@ -779,6 +780,8 @@ def store_entry(payload, upload=None, source="ring", interpretation_action_overr
         log_activity("info","item_completed",f"Completed Item matching {interpretation['arguments']['query']}",item_id)
         result={"id":item_id,"created":False,"duplicate":False,"operation":"complete_item"}
         return operation_receipt(source,source_key,proposed_interpretation,receipt_reason,result,"reopen_item",{"id":item_id})
+    if interpretation["operation"]=="search_items":
+        raise ValueError("Search commands must be opened from the client and are never stored as Items")
     if requested_collection and interpretation["ambiguous"]:raise ValueError("Collection not found or archived")
     group_name=interpretation["arguments"].get("collectionName")
     if interpretation["operation"] in {"add_to_collection","set_reminder"}:transcription=interpretation["arguments"]["text"]
@@ -832,7 +835,7 @@ def groups():return jsonify([dict(row) for row in db().execute("""SELECT g.displ
 @api_auth
 def create_collection():
     name=normalized_group_name((request.get_json(silent=True) or {}).get("name",""))
-    if not name:return jsonify(error="Collection names must be 1-32 letters, numbers, hyphens or underscores"),400
+    if not name:return jsonify(error="Collection names must be 1-32 letters, numbers, spaces, hyphens or underscores"),400
     created=now()
     try:
         db().execute("INSERT INTO note_groups(name,display_name,created_at) VALUES(?,?,?)",(name,name,created))
@@ -851,7 +854,7 @@ def update_group(name):
     target=current; renamed=False
     if "name" in body:
         target=normalized_group_name(body["name"])
-        if not target:return jsonify(error="Collection names must be 1-32 letters, numbers, hyphens or underscores"),400
+        if not target:return jsonify(error="Collection names must be 1-32 letters, numbers, spaces, hyphens or underscores"),400
         if target!=current and connection.execute("SELECT 1 FROM note_groups WHERE name=?",(target,)).fetchone():return jsonify(error="A Collection with that name already exists"),409
         alias_owner=connection.execute("SELECT group_name FROM note_group_aliases WHERE alias=?",(target.lower(),)).fetchone()
         if alias_owner and alias_owner["group_name"].lower()!=row["display_name"].lower():return jsonify(error="That name conflicts with another group's alias"),409
@@ -985,7 +988,9 @@ def entries():
     for field in ("category","processed","completed","starred","archived","group_name"):
         if request.args.get(field) not in (None,""): where.append(f"{field}=?"); values.append(request.args[field])
     view=request.args.get("view","")
-    if view=="reminders":where.append("due_at IS NOT NULL AND reminder_completed=0")
+    if view=="active":where.append("completed=0 AND reminder_completed=0")
+    elif view=="handled":where.append("due_at IS NOT NULL AND reminder_completed=1")
+    elif view=="reminders":where.append("due_at IS NOT NULL AND reminder_completed=0")
     elif view=="today":
         local_tomorrow=datetime.now(REMINDER_ZONE).date()+timedelta(days=1)
         tomorrow=datetime(local_tomorrow.year,local_tomorrow.month,local_tomorrow.day,tzinfo=REMINDER_ZONE).astimezone(timezone.utc).isoformat()
@@ -1053,6 +1058,7 @@ def remove_entry(entry_id):
     if row["audio_path"]:
         try:(AUDIO_DIR/row["audio_path"]).unlink(missing_ok=True)
         except OSError as error:log_activity("warning","cleanup","Audio cleanup failed",str(error))
+    log_activity("info","item_deleted","Deleted Item",entry_id)
     return True
 
 @app.delete("/api/entries/<entry_id>")
@@ -1234,7 +1240,7 @@ def change_feed_since(since,latest=None):
     if latest is None:latest=db().execute("SELECT coalesce(max(id),0) FROM activity").fetchone()[0]
     placeholders=",".join("?" for _ in CAPTURE_EVENT_KINDS)
     rows=db().execute(f"""SELECT id,created_at,level,kind,message,
-      CASE WHEN kind IN ('capture_standalone','capture_grouped','group_unrecognized','item_completed','item_reopened','collection_changed') THEN details ELSE '' END AS details
+      CASE WHEN kind IN ('capture_standalone','capture_grouped','group_unrecognized','item_completed','item_reopened','item_deleted','collection_changed') THEN details ELSE '' END AS details
       FROM activity WHERE id>? AND kind IN ({placeholders}) ORDER BY id LIMIT 50""",(since,*sorted(CAPTURE_EVENT_KINDS))).fetchall()
     sequence=rows[-1]["id"] if len(rows)==50 else latest
     return {"sequence":sequence,"events":[dict(row) for row in rows]}

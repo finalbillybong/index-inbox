@@ -152,6 +152,7 @@ data class AppState(
     val inboxFilter: String = "active",
     val categoryFilter: String = "",
     val groupFilter: String = "",
+    val searchQuery: String = "",
     val notificationsEnabled: Boolean = true,
     val instantNotifications: Boolean = true,
     val notificationPreview:Boolean = true,
@@ -353,6 +354,7 @@ class IndexViewModel(
     fun setFilter(filter: String) { _state.value = _state.value.copy(inboxFilter = filter) }
     fun setCategoryFilter(category: String) { _state.value = _state.value.copy(categoryFilter = category) }
     fun setGroupFilter(group: String) { _state.value = _state.value.copy(groupFilter = group) }
+    fun setSearchQuery(query:String) { _state.value=_state.value.copy(searchQuery=query,screen="inbox",captureOpen=false) }
     fun showScreen(screen: String) {
         _state.value = _state.value.copy(screen = screen)
         if (screen == "groups") loadGroups()
@@ -991,19 +993,20 @@ internal fun filterInboxEntries(
         "all" -> true
         "today" -> it.dueAt?.let(::isDueBeforeTomorrow)==true&&it.reminderCompleted==0&&it.archived==0
         "reminders" -> it.dueAt!=null&&it.reminderCompleted==0&&it.archived==0
+        "handled" -> it.dueAt!=null&&it.reminderCompleted==1&&it.archived==0
         "starred" -> it.starred==1&&it.archived==0
         "unprocessed" -> it.processed==0&&it.archived==0
         "incomplete" -> it.completed==0&&it.archived==0
         "completed" -> it.completed==1&&it.archived==0
         "archived" -> it.archived==1
-        else -> it.archived==0
+        else -> it.archived==0&&it.completed==0&&it.reminderCompleted==0
     }
 }.filter{categoryFilter.isBlank()||it.category==categoryFilter}
  .filter{groupFilter.isBlank()||it.groupName==groupFilter}
  .filter{query.isBlank()||it.title.contains(query,true)||it.transcription.contains(query,true)||it.tags.contains(query,true)}
 
 internal val inboxStateFilters=listOf(
-    "active" to "Active","today" to "Today","reminders" to "Reminders","all" to "All",
+    "active" to "Open","today" to "Today","reminders" to "Reminders","handled" to "Handled reminders","all" to "All",
     "unprocessed" to "Unprocessed","incomplete" to "Incomplete","completed" to "Completed",
     "starred" to "Starred","archived" to "Archived",
 )
@@ -1186,6 +1189,7 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             },
             onTranscribe = viewModel::transcribeAudio,
             onInterpret = viewModel::interpret,
+            onSearch = { query -> closeCapture(); viewModel.setSearchQuery(query) },
         )
         state.selected != null -> EntryScreen(
             entry = state.selected!!,
@@ -1204,7 +1208,8 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             loading = state.loading,
             snackbar = snackbar,
             onRefresh = { viewModel.refresh() },
-            onSearch = viewModel::refresh,
+            query = state.searchQuery,
+            onSearch = viewModel::setSearchQuery,
             onSelect = viewModel::select,
             onCapture = { viewModel.showCapture(true) },
             onLogout = viewModel::logout,
@@ -1267,6 +1272,7 @@ private fun InboxScreen(
     loading: Boolean,
     snackbar: SnackbarHostState,
     onRefresh: () -> Unit,
+    query: String,
     onSearch: (String) -> Unit,
     onSelect: (Entry) -> Unit,
     onCapture: () -> Unit,
@@ -1287,7 +1293,6 @@ private fun InboxScreen(
     onBulk: (Set<String>,String) -> Unit,
     onStar: (Entry) -> Unit,
 ) {
-    var query by remember { mutableStateOf("") }
     var selected by remember { mutableStateOf(setOf<String>()) }
     var pendingDelete by remember { mutableStateOf<Set<String>?>(null) }
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1409,7 +1414,7 @@ private fun InboxScreen(
         Column(Modifier.padding(padding)) {
             OutlinedTextField(
                 value = query,
-                onValueChange = { query = it },
+                onValueChange = onSearch,
                 leadingIcon = { Icon(Icons.Default.Search, null) },
                 placeholder = { Text("Search your inbox") },
                 singleLine = true,
@@ -2354,6 +2359,7 @@ private fun CaptureScreen(
     onSaveAudio: (String, String, String, File, String) -> Unit,
     onTranscribe: (File, (Result<String>) -> Unit) -> Unit,
     onInterpret: (String, (Result<InterpretationResult>) -> Unit) -> Unit,
+    onSearch: (String) -> Unit,
 ) {
     val context = LocalContext.current
     var title by remember { mutableStateOf("") }
@@ -2365,6 +2371,7 @@ private fun CaptureScreen(
     var status by remember(initialStatus) { mutableStateOf(initialStatus) }
     var interpretation by remember { mutableStateOf<InterpretationResult?>(null) }
     var interpreting by remember { mutableStateOf(false) }
+    var previewFailed by remember { mutableStateOf(false) }
     fun stopRecording() {
         runCatching { recorder?.stop() }
         recorder?.release()
@@ -2415,12 +2422,13 @@ private fun CaptureScreen(
     }
     LaunchedEffect(text) {
         interpretation=null
+        previewFailed=false
         if(text.isBlank())return@LaunchedEffect
         delay(350)
         interpreting=true
         onInterpret(text) { result ->
             interpreting=false
-            result.onSuccess { interpretation=it }.onFailure { status="Could not preview operation: ${it.message}" }
+            result.onSuccess { interpretation=it }.onFailure { previewFailed=true;status="Could not preview operation: ${it.message}" }
         }
     }
     val microphonePermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -2490,9 +2498,21 @@ private fun CaptureScreen(
                     }
                 } }
             }
+            if(previewFailed) OutlinedButton(onClick={
+                val audio=recordingFile
+                if(audio!=null)onSaveAudio(title,text,category,audio,"plain") else onSave(title,text,category,"plain")
+            },enabled=!loading&&!isRecording&&(text.isNotBlank()||recordingFile!=null),modifier=Modifier.fillMaxWidth()) {
+                Text("Save as plain Item for offline sync")
+            }
             Button(
                 onClick = {
                     if (isRecording) stopRecording()
+                    val proposal=interpretation
+                    if(proposal?.operation=="search_items") {
+                        val query=(proposal.arguments["query"] as? JsonPrimitive)?.content?:text
+                        onSearch(query)
+                        return@Button
+                    }
                     val audio = recordingFile
                     if (audio != null) onSaveAudio(title,text,category,audio,"accept") else onSave(title,text,category,"accept")
                 },

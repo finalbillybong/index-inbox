@@ -10,6 +10,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.Data
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import kotlinx.coroutines.CoroutineScope
@@ -105,7 +106,9 @@ object ReminderScheduler {
         .putString(ReminderWorker.KEY_ID,id).putBoolean(ReminderWorker.KEY_EARLY,early).build()
 
     fun enqueueImmediate(context:Context,id:String,early:Boolean) {
-        val work=OneTimeWorkRequestBuilder<ReminderWorker>().setInputData(workerData(id,early)).build()
+        val work=OneTimeWorkRequestBuilder<ReminderWorker>()
+            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+            .setInputData(workerData(id,early)).build()
         WorkManager.getInstance(context).enqueueUniqueWork(workName(id,early),ExistingWorkPolicy.REPLACE,work)
     }
 

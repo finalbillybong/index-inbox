@@ -70,14 +70,14 @@ same trusted administrative access; there are no per-user inboxes or roles.
 
 The published image includes the web application, API and matching signed Android APK. A new server needs Docker Compose, an HTTPS origin and a persistent data directory; it does not need Git, Python, Java or the Android SDK.
 
-Run the setup helper with the public HTTPS origin and absolute data path:
+Run the setup helper with the public HTTPS origin, absolute data path, and your IANA timezone:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/finalbillybong/index-inbox/main/setup.sh \
-  | bash -s -- https://index.example.com /absolute/path/to/index-inbox/data
+  | bash -s -- https://index.example.com /absolute/path/to/index-inbox/data Europe/London
 ```
 
-The helper downloads `compose.yaml`, generates independent webhook and setup secrets, creates `.env`, pulls the latest GHCR image and starts the service. It prints the one-time setup token.
+The helper downloads `compose.yaml`, generates independent webhook and setup secrets, records the reminder timezone in `.env`, pulls the latest GHCR image and starts the service. It prints the one-time setup token.
 
 Open the HTTPS origin and create the first account using that token, a username and a password of at least 12 characters. Then remove the `LOCAL_SETUP_TOKEN` line from `.env` and recreate the container:
 
@@ -209,6 +209,7 @@ Local mode keeps account credentials and sessions in the same SQLite database as
    AUTH_ALLOWED_ORIGINS=https://index.example.com,http://192.168.1.10:5050
    AUTH_COOKIE_SECURE=true
    LOCAL_SETUP_TOKEN=second-generated-value
+   REMINDER_TIMEZONE=Europe/London
    ```
 
    Origins are matched exactly. Use the address shown by `location.origin` in the browser, including the scheme and any non-default port.
@@ -242,9 +243,12 @@ The `androidApp` module is a native Kotlin and Jetpack Compose client for local-
 Deploy the current server before opening the Android app. The SQLite migration for native device tokens runs automatically at startup:
 
 ```bash
+curl -fsSLo compose.yaml https://raw.githubusercontent.com/finalbillybong/index-inbox/main/compose.yaml
 docker compose pull
-docker compose up -d
+docker compose up -d --force-recreate
 ```
+
+Refreshing `compose.yaml` is required when an update adds new environment options; pulling the image alone cannot update an existing Compose file. Review local Compose customizations before replacing the file.
 
 Build a debug APK with Android SDK Platform 35 and JDK 17:
 
@@ -294,6 +298,8 @@ Native settings can disable all activity notifications or independently stop the
 Notification settings also control note previews, sound, vibration, and configurable quiet hours. Quiet-hour notifications are delivered silently rather than discarded. The home-screen audio widget supports configurable 1, 3, 5, 10, or 15 second recording limits.
 
 Natural-language captures can create reminders without a cloud service. The layered parser extracts the reminder intent, action and most-specific time expression independently, so the time may occur anywhere in the sentence. Supported forms include relative and compound durations (`in half an hour`, `in two hours and thirty minutes`), bare times, today/tomorrow with morning/afternoon/evening/night, weekdays, named or ISO dates, `this weekend`, and `next week`. Times may use a colon or full stop. Examples include `Remind me at 7.30 to have a coffee`, `Don't forget in a couple of weeks to renew the filter`, and `Remind me next Monday at 9am to submit expenses`.
+
+The default **Open** inbox contains Items that are neither completed nor handled reminders. **Completed** remains the Item completion state, while **Handled reminders** retains reminders whose notification lifecycle is finished; **All** shows every non-filtered state. These remain separate fields and neither is reused as **Processed**.
 
 A bare time means its next occurrence. `REMINDER_CLOCK_FORMAT=24` rolls a passed bare hour to tomorrow; `12` first tries the corresponding PM time, matching a 12-hour phone locale. Calendar expressions use `REMINDER_TIMEZONE`. Relative reminders are anchored to the note's original recording timestamp, so offline/widget retries do not shift their deadlines. Unsupported recurrence and explicit past times remain ordinary notes rather than being guessed.
 
