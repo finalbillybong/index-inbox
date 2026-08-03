@@ -158,6 +158,10 @@ data class AppState(
     val notificationPreview:Boolean = true,
     val notificationSound:Boolean = true,
     val notificationVibration:Boolean = true,
+    val notifyNewItems:Boolean = true,
+    val notifyReminders:Boolean = true,
+    val notifyCommandOutcomes:Boolean = true,
+    val notifyProblems:Boolean = true,
     val quietHoursEnabled:Boolean = false,
     val quietHoursStart:Int = 22,
     val quietHoursEnd:Int = 7,
@@ -181,6 +185,8 @@ class IndexViewModel(
         notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,
         notificationPreview=auth.notificationPreview,notificationSound=auth.notificationSound,
         notificationVibration=auth.notificationVibration,quietHoursEnabled=auth.quietHoursEnabled,
+        notifyNewItems=auth.notifyNewItems,notifyReminders=auth.notifyReminders,
+        notifyCommandOutcomes=auth.notifyCommandOutcomes,notifyProblems=auth.notifyProblems,
         quietHoursStart=auth.quietHoursStart,quietHoursEnd=auth.quietHoursEnd,
         widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory,
         widgetRecordingSeconds=auth.widgetRecordingSeconds,
@@ -237,7 +243,15 @@ class IndexViewModel(
                 SyncWorker.schedule(getApplication())
                 PendingCaptureWorker.schedule(getApplication())
                 if(auth.notificationsEnabled&&auth.instantNotifications)InstantSyncService.start(getApplication())
-                _state.value=AppState(authenticated=true,darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory)
+                _state.value=AppState(
+                    authenticated=true,darkMode=auth.darkMode,themeMode=auth.themeMode,
+                    notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,
+                    notificationPreview=auth.notificationPreview,notificationSound=auth.notificationSound,notificationVibration=auth.notificationVibration,
+                    notifyNewItems=auth.notifyNewItems,notifyReminders=auth.notifyReminders,
+                    notifyCommandOutcomes=auth.notifyCommandOutcomes,notifyProblems=auth.notifyProblems,
+                    quietHoursEnabled=auth.quietHoursEnabled,quietHoursStart=auth.quietHoursStart,quietHoursEnd=auth.quietHoursEnd,
+                    widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory,widgetRecordingSeconds=auth.widgetRecordingSeconds,
+                )
                 CaptureWidgetProvider.updateAll(getApplication())
                 refresh()
             } catch(error:Exception) {
@@ -310,6 +324,7 @@ class IndexViewModel(
         auth.setNotificationsEnabled(enabled)
         _state.value=_state.value.copy(notificationsEnabled=enabled)
         if(enabled&&_state.value.instantNotifications)InstantSyncService.start(getApplication()) else InstantSyncService.stop(getApplication())
+        ReminderScheduler.reconcile(getApplication(),entries.value)
     }
     fun setInstantNotifications(enabled: Boolean) {
         auth.setInstantNotifications(enabled)
@@ -329,6 +344,17 @@ class IndexViewModel(
         auth.setNotificationVibration(enabled)
         _state.value=_state.value.copy(notificationVibration=enabled)
         NotificationCenter.ensureChannels(getApplication())
+    }
+    fun setNotificationType(type:String,enabled:Boolean) {
+        auth.setNotificationType(type,enabled)
+        _state.value=when(type) {
+            "items" -> _state.value.copy(notifyNewItems=enabled)
+            "reminders" -> _state.value.copy(notifyReminders=enabled)
+            "commands" -> _state.value.copy(notifyCommandOutcomes=enabled)
+            "problems" -> _state.value.copy(notifyProblems=enabled)
+            else -> _state.value
+        }
+        ReminderScheduler.reconcile(getApplication(),entries.value)
     }
     fun setQuietHours(enabled:Boolean,start:Int,end:Int) {
         auth.setQuietHours(enabled,start,end)
@@ -879,7 +905,15 @@ class IndexViewModel(
             SyncWorker.cancel(getApplication())
             InstantSyncService.stop(getApplication())
             CaptureWidgetProvider.updateAll(getApplication())
-            _state.value=AppState(darkMode=auth.darkMode,themeMode=auth.themeMode,notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory)
+            _state.value=AppState(
+                darkMode=auth.darkMode,themeMode=auth.themeMode,
+                notificationsEnabled=auth.notificationsEnabled,instantNotifications=auth.instantNotifications,
+                notificationPreview=auth.notificationPreview,notificationSound=auth.notificationSound,notificationVibration=auth.notificationVibration,
+                notifyNewItems=auth.notifyNewItems,notifyReminders=auth.notifyReminders,
+                notifyCommandOutcomes=auth.notifyCommandOutcomes,notifyProblems=auth.notifyProblems,
+                quietHoursEnabled=auth.quietHoursEnabled,quietHoursStart=auth.quietHoursStart,quietHoursEnd=auth.quietHoursEnd,
+                widgetCaptureMode=auth.widgetCaptureMode,widgetCaptureCategory=auth.widgetCaptureCategory,widgetRecordingSeconds=auth.widgetRecordingSeconds,
+            )
         }
     }
 
@@ -991,22 +1025,21 @@ internal fun filterInboxEntries(
 )=entries.filter {
     when(filter) {
         "all" -> true
-        "today" -> it.dueAt?.let(::isDueBeforeTomorrow)==true&&it.reminderCompleted==0&&it.archived==0
-        "reminders" -> it.dueAt!=null&&it.reminderCompleted==0&&it.archived==0
-        "handled" -> it.dueAt!=null&&it.reminderCompleted==1&&it.archived==0
+        "today" -> it.dueAt?.let(::isDueBeforeTomorrow)==true&&it.completed==0&&it.archived==0
+        "reminders" -> it.dueAt!=null&&it.completed==0&&it.archived==0
         "starred" -> it.starred==1&&it.archived==0
         "unprocessed" -> it.processed==0&&it.archived==0
         "incomplete" -> it.completed==0&&it.archived==0
         "completed" -> it.completed==1&&it.archived==0
         "archived" -> it.archived==1
-        else -> it.archived==0&&it.completed==0&&it.reminderCompleted==0
+        else -> it.archived==0&&it.completed==0
     }
 }.filter{categoryFilter.isBlank()||it.category==categoryFilter}
  .filter{groupFilter.isBlank()||it.groupName==groupFilter}
  .filter{query.isBlank()||it.title.contains(query,true)||it.transcription.contains(query,true)||it.tags.contains(query,true)}
 
 internal val inboxStateFilters=listOf(
-    "active" to "Open","today" to "Today","reminders" to "Reminders","handled" to "Handled reminders","all" to "All",
+    "active" to "Open","today" to "Today","reminders" to "Reminders","all" to "All",
     "unprocessed" to "Unprocessed","incomplete" to "Incomplete","completed" to "Completed",
     "starred" to "Starred","archived" to "Archived",
 )
@@ -1126,14 +1159,6 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             indexRingSecret=indexRingSecret,
             automation=automation,
             interpretationModel=interpretationModel,
-            notificationsEnabled=state.notificationsEnabled,
-            instantNotifications=state.instantNotifications,
-            notificationPreview=state.notificationPreview,
-            notificationSound=state.notificationSound,
-            notificationVibration=state.notificationVibration,
-            quietHoursEnabled=state.quietHoursEnabled,
-            quietHoursStart=state.quietHoursStart,
-            quietHoursEnd=state.quietHoursEnd,
             widgetCaptureMode=state.widgetCaptureMode,
             widgetCaptureCategory=state.widgetCaptureCategory,
             widgetRecordingSeconds=state.widgetRecordingSeconds,
@@ -1144,12 +1169,6 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onExport=viewModel::downloadExport,
             onDownloadBackup=viewModel::downloadLatestBackup,
             onBackupHook=viewModel::triggerBackupHook,
-            onNotifications=viewModel::setNotifications,
-            onInstantNotifications=viewModel::setInstantNotifications,
-            onNotificationPreview=viewModel::setNotificationPreview,
-            onNotificationSound=viewModel::setNotificationSound,
-            onNotificationVibration=viewModel::setNotificationVibration,
-            onQuietHours=viewModel::setQuietHours,
             onWidgetCaptureMode=viewModel::setWidgetCaptureMode,
             onWidgetCaptureCategory=viewModel::setWidgetCaptureCategory,
             onWidgetRecordingSeconds=viewModel::setWidgetRecordingSeconds,
@@ -1163,6 +1182,18 @@ fun IndexApp(viewModel: IndexViewModel,effectiveDark:Boolean) {
             onAutomation=viewModel::setAutomation,
             onInterpretationModel=viewModel::setInterpretationModel,
             onTestInterpretationModel=viewModel::testInterpretationModel,
+            onNotificationSettings={viewModel.showScreen("notifications")},
+        )
+        state.screen == "notifications" -> NotificationSettingsScreen(
+            state=state,
+            onBack={viewModel.showScreen("status")},
+            onNotifications=viewModel::setNotifications,
+            onInstantNotifications=viewModel::setInstantNotifications,
+            onNotificationPreview=viewModel::setNotificationPreview,
+            onNotificationSound=viewModel::setNotificationSound,
+            onNotificationVibration=viewModel::setNotificationVibration,
+            onNotificationType=viewModel::setNotificationType,
+            onQuietHours=viewModel::setQuietHours,
         )
         state.screen == "activity" -> ActivityScreen(activity,state.loading,{viewModel.showScreen("inbox")},viewModel::confirmOperation,viewModel::undoOperation)
         state.screen == "pending" -> PendingCapturesScreen(
@@ -1486,9 +1517,9 @@ private fun InboxScreen(
                                 Text(entry.transcription.ifBlank { "Audio recording" }, maxLines = 3, style = MaterialTheme.typography.bodyLarge)
                                 if(entry.completed==1)Text("✓ Completed",style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.primary,fontWeight=FontWeight.Bold)
                                 if(entry.dueAt!=null)Text(
-                                    "${if(entry.reminderCompleted==1)"Handled" else "Reminder"} • ${reminderDate(entry.dueAt)}${entry.reminderNotifyBeforeMinutes?.let{" • ${it}m early"}.orEmpty()}",
+                                    "${if(entry.completed==1)"Completed reminder" else "Reminder"} • ${reminderDate(entry.dueAt)}${entry.reminderNotifyBeforeMinutes?.let{" • ${it}m early"}.orEmpty()}",
                                     style=MaterialTheme.typography.labelSmall,
-                                    color=if(entry.reminderCompleted==1)MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
+                                    color=if(entry.completed==1)MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary,
                                     fontWeight=FontWeight.Bold,
                                 )
                                 Text(formatDate(entry.createdAt), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1554,7 +1585,7 @@ private fun EntryScreen(
                 IconButton(
                     onClick={onSave(EntryUpdate(
                         title=title,transcription=text,tags=tags,dueAt=dueAt,
-                        reminderCompleted=if(dueAt.isBlank())false else null,
+                        completed=if(dueAt.isNotBlank()&&entry.dueAt!=dueAt)false else null,
                         reminderNotifyBeforeMinutes=notifyBefore.toIntOrNull()?:0,
                     ))},
                     enabled=!loading,
@@ -1593,10 +1624,6 @@ private fun EntryScreen(
                 placeholder={Text("Optional")},singleLine=true,enabled=dueAt.isNotBlank(),
                 modifier=Modifier.fillMaxWidth(),
             )
-            if(entry.dueAt!=null)Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text("Reminder handled",Modifier.weight(1f))
-                Switch(checked=entry.reminderCompleted==1,onCheckedChange={onSave(EntryUpdate(reminderCompleted=it))})
-            }
             Text("Category", style = MaterialTheme.typography.labelMedium)
             FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 listOf("note","task","idea","question").forEach { category ->
@@ -1917,6 +1944,68 @@ private fun SuggestionsScreen(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+private fun NotificationSettingsScreen(
+    state:AppState,
+    onBack:()->Unit,
+    onNotifications:(Boolean)->Unit,
+    onInstantNotifications:(Boolean)->Unit,
+    onNotificationPreview:(Boolean)->Unit,
+    onNotificationSound:(Boolean)->Unit,
+    onNotificationVibration:(Boolean)->Unit,
+    onNotificationType:(String,Boolean)->Unit,
+    onQuietHours:(Boolean,Int,Int)->Unit,
+) {
+    val context=LocalContext.current
+    val exactReminders=Build.VERSION.SDK_INT<Build.VERSION_CODES.S||context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
+    var quietStart by remember(state.quietHoursStart){mutableStateOf(state.quietHoursStart.toString())}
+    var quietEnd by remember(state.quietHoursEnd){mutableStateOf(state.quietHoursEnd.toString())}
+    @Composable fun preference(title:String,detail:String,checked:Boolean,enabled:Boolean=true,onChange:(Boolean)->Unit) {
+        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) { Text(title);Text(detail,style=MaterialTheme.typography.labelSmall) }
+            Switch(checked=checked,onCheckedChange=onChange,enabled=enabled)
+        }
+    }
+    Scaffold(topBar={TopAppBar(
+        title={Text("Notifications")},
+        navigationIcon={IconButton(onClick=onBack){Icon(Icons.AutoMirrored.Filled.ArrowBack,"Back")}},
+    )}) { padding ->
+        Column(Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(20.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+            Text("Delivery",fontWeight=FontWeight.Bold)
+            preference("Allow notifications","Master control for every Index Inbox alert",state.notificationsEnabled,onChange=onNotifications)
+            preference("Instant connection","Receive server events immediately; shows a permanent connection notification",state.instantNotifications,state.notificationsEnabled,onInstantNotifications)
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)){Text("Exact reminder timing");Text(if(exactReminders)"Enabled" else "Using Android's battery-managed fallback",style=MaterialTheme.typography.labelSmall)}
+                if(!exactReminders)OutlinedButton(onClick={context.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply{data=Uri.parse("package:${context.packageName}")})}){Text("Enable")}
+            }
+            HorizontalDivider()
+            Text("Notify me about",fontWeight=FontWeight.Bold)
+            preference("New Items","Captures received from the Ring, webhooks, and other clients",state.notifyNewItems,state.notificationsEnabled){onNotificationType("items",it)}
+            preference("Reminders","Due reminders and optional early alerts",state.notifyReminders,state.notificationsEnabled){onNotificationType("reminders",it)}
+            preference("Command outcomes","Results and confirmations from interpreted Ring commands",state.notifyCommandOutcomes,state.notificationsEnabled){onNotificationType("commands",it)}
+            preference("Problems requiring attention","Rejected webhooks, failed ingestion, and unrecognized destinations",state.notifyProblems,state.notificationsEnabled){onNotificationType("problems",it)}
+            HorizontalDivider()
+            Text("Appearance and sound",fontWeight=FontWeight.Bold)
+            preference("Show Item previews","Include captured text on the lock screen notification",state.notificationPreview,state.notificationsEnabled,onNotificationPreview)
+            preference("Sound","Play the selected Android notification sound",state.notificationSound,state.notificationsEnabled,onNotificationSound)
+            preference("Vibration","Vibrate when an alert arrives",state.notificationVibration,state.notificationsEnabled,onNotificationVibration)
+            HorizontalDivider()
+            Text("Quiet hours",fontWeight=FontWeight.Bold)
+            preference("Silence overnight","Alerts still arrive, without sound or vibration",state.quietHoursEnabled,state.notificationsEnabled){
+                onQuietHours(it,quietStart.toIntOrNull()?.coerceIn(0,23)?:22,quietEnd.toIntOrNull()?.coerceIn(0,23)?:7)
+            }
+            if(state.quietHoursEnabled) {
+                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(quietStart,{quietStart=it.filter(Char::isDigit).take(2)},label={Text("From (0–23)")},singleLine=true,modifier=Modifier.weight(1f))
+                    OutlinedTextField(quietEnd,{quietEnd=it.filter(Char::isDigit).take(2)},label={Text("Until (0–23)")},singleLine=true,modifier=Modifier.weight(1f))
+                }
+                OutlinedButton(onClick={onQuietHours(true,quietStart.toIntOrNull()?.coerceIn(0,23)?:22,quietEnd.toIntOrNull()?.coerceIn(0,23)?:7)}){Text("Save quiet hours")}
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
 private fun StatusScreen(
     status: ServerStatus?,
     loading: Boolean,
@@ -1927,14 +2016,6 @@ private fun StatusScreen(
     indexRingSecret: String?,
     automation:AutomationSettings?,
     interpretationModel:InterpretationModelSettings?,
-    notificationsEnabled: Boolean,
-    instantNotifications: Boolean,
-    notificationPreview:Boolean,
-    notificationSound:Boolean,
-    notificationVibration:Boolean,
-    quietHoursEnabled:Boolean,
-    quietHoursStart:Int,
-    quietHoursEnd:Int,
     widgetCaptureMode: String,
     widgetCaptureCategory: String,
     widgetRecordingSeconds:Int,
@@ -1945,12 +2026,6 @@ private fun StatusScreen(
     onExport: (String,Uri) -> Unit,
     onDownloadBackup: (Uri) -> Unit,
     onBackupHook: () -> Unit,
-    onNotifications: (Boolean) -> Unit,
-    onInstantNotifications: (Boolean) -> Unit,
-    onNotificationPreview:(Boolean)->Unit,
-    onNotificationSound:(Boolean)->Unit,
-    onNotificationVibration:(Boolean)->Unit,
-    onQuietHours:(Boolean,Int,Int)->Unit,
     onWidgetCaptureMode: (String) -> Unit,
     onWidgetCaptureCategory: (String) -> Unit,
     onWidgetRecordingSeconds:(Int)->Unit,
@@ -1964,16 +2039,14 @@ private fun StatusScreen(
     onAutomation:(Boolean)->Unit,
     onInterpretationModel:(Boolean)->Unit,
     onTestInterpretationModel:()->Unit,
+    onNotificationSettings:()->Unit,
 ) {
     var retentionDialog by remember { mutableStateOf(false) }
     var days by remember { mutableStateOf("30") }
     var integrationAction by remember { mutableStateOf<String?>(null) }
     var integrationPassword by remember { mutableStateOf("") }
-    var quietStart by remember(quietHoursStart){mutableStateOf(quietHoursStart.toString())}
-    var quietEnd by remember(quietHoursEnd){mutableStateOf(quietHoursEnd.toString())}
     val clipboard=LocalClipboardManager.current
     val context=LocalContext.current
-    val exactReminders=Build.VERSION.SDK_INT<Build.VERSION_CODES.S||context.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
     val markdownExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri -> if(uri!=null)onExport("markdown",uri) }
     val jsonExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri -> if(uri!=null)onExport("json",uri) }
     val zipExport=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> if(uri!=null)onExport("zip",uri) }
@@ -2049,63 +2122,10 @@ private fun StatusScreen(
             Text("Notifications",fontWeight=FontWeight.Bold)
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Exact reminder timing")
-                    Text(if(exactReminders)"Enabled" else "Using battery-managed fallback",style=MaterialTheme.typography.labelSmall)
+                    Text("Notification preferences")
+                    Text("Choose events, delivery, privacy, and quiet hours",style=MaterialTheme.typography.labelSmall)
                 }
-                if(!exactReminders)OutlinedButton(onClick={
-                    context.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply{data=Uri.parse("package:${context.packageName}")})
-                }){Text("Enable")}
-            }
-            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text("Activity notifications",Modifier.weight(1f))
-                Switch(checked=notificationsEnabled,onCheckedChange=onNotifications)
-            }
-            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Instant self-hosted connection")
-                    Text("Shows a permanent connected notification",style=MaterialTheme.typography.labelSmall)
-                }
-                Switch(checked=instantNotifications,onCheckedChange=onInstantNotifications,enabled=notificationsEnabled)
-            }
-            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text("Show Item previews",Modifier.weight(1f))
-                Switch(checked=notificationPreview,onCheckedChange=onNotificationPreview,enabled=notificationsEnabled)
-            }
-            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text("Sound",Modifier.weight(1f))
-                Switch(checked=notificationSound,onCheckedChange=onNotificationSound,enabled=notificationsEnabled)
-            }
-            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Text("Vibration",Modifier.weight(1f))
-                Switch(checked=notificationVibration,onCheckedChange=onNotificationVibration,enabled=notificationsEnabled)
-            }
-            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)){
-                    Text("Quiet hours")
-                    Text("Notifications arrive silently during this window",style=MaterialTheme.typography.labelSmall)
-                }
-                Switch(
-                    checked=quietHoursEnabled,
-                    onCheckedChange={
-                        onQuietHours(it,quietStart.toIntOrNull()?.coerceIn(0,23)?:22,quietEnd.toIntOrNull()?.coerceIn(0,23)?:7)
-                    },
-                    enabled=notificationsEnabled,
-                )
-            }
-            if(quietHoursEnabled) {
-                Row(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        quietStart,{quietStart=it.filter(Char::isDigit).take(2)},
-                        label={Text("From (0–23)")},singleLine=true,modifier=Modifier.weight(1f),
-                    )
-                    OutlinedTextField(
-                        quietEnd,{quietEnd=it.filter(Char::isDigit).take(2)},
-                        label={Text("Until (0–23)")},singleLine=true,modifier=Modifier.weight(1f),
-                    )
-                }
-                OutlinedButton(
-                    onClick={onQuietHours(true,quietStart.toIntOrNull()?.coerceIn(0,23)?:22,quietEnd.toIntOrNull()?.coerceIn(0,23)?:7)},
-                ){Text("Save quiet hours")}
+                OutlinedButton(onClick=onNotificationSettings){Text("Open")}
             }
             HorizontalDivider()
             Text("Home-screen audio widget",fontWeight=FontWeight.Bold)

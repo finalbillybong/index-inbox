@@ -26,7 +26,7 @@ class ReminderWorker(context:Context,params:WorkerParameters):CoroutineWorker(co
         val early=inputData.getBoolean(KEY_EARLY,false)
         val entry=IndexDatabase.get(applicationContext).entries().get(id)?:return Result.success()
         val due=entry.dueAt?.let{runCatching{Instant.parse(it)}.getOrNull()}?:return Result.success()
-        if(entry.reminderCompleted==1||entry.archived==1)return Result.success()
+        if(entry.completed==1||entry.archived==1)return Result.success()
         val trigger=if(early)entry.reminderNotifyBeforeMinutes?.let{due.minusSeconds(it*60L)} else due
         if(trigger==null)return Result.success()
         val marker=ReminderScheduler.marker(entry,early)
@@ -57,7 +57,8 @@ object ReminderScheduler {
 
     fun reconcile(context:Context,entries:List<Entry>) {
         val preferences=preferences(context)
-        val active=entries.filter{it.dueAt!=null&&it.reminderCompleted==0&&it.archived==0}.associateBy{it.id}
+        val auth=AuthStore(context)
+        val active=if(auth.notificationsEnabled&&auth.notifyReminders) entries.filter{it.dueAt!=null&&it.completed==0&&it.archived==0}.associateBy{it.id} else emptyMap()
         val previous=preferences.getStringSet(SCHEDULED,emptySet()).orEmpty()
         (previous-active.keys).forEach{cancel(context,it)}
         active.values.forEach { entry ->

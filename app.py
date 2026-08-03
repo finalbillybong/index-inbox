@@ -125,7 +125,12 @@ def init_db(path=DB_PATH):
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_source_key ON entries(source_key) WHERE source_key IS NOT NULL")
     con.execute("INSERT OR IGNORE INTO note_group_aliases(alias,group_name) SELECT lower(display_name),display_name FROM note_groups")
     con.execute("UPDATE entries SET category='note' WHERE category='action'")
-    con.execute("PRAGMA user_version=2")
+    # reminder_completed was the original acknowledgement flag. Completion is now
+    # the single user-facing state; retain and mirror the old column for clients
+    # upgrading from earlier releases.
+    con.execute("UPDATE entries SET completed=1 WHERE reminder_completed=1 AND completed=0")
+    con.execute("UPDATE entries SET reminder_completed=completed WHERE due_at IS NOT NULL")
+    con.execute("PRAGMA user_version=3")
     con.commit(); con.close()
 init_db()
 
@@ -973,6 +978,7 @@ def dismiss_group_suggestion(entry_id):
 
 def entry_dict(row, collection_vocabulary=False):
     item=dict(row)
+    if item.get("due_at") is not None:item["reminder_completed"]=item.get("completed",0)
     if collection_vocabulary:item["collection_name"]=item["group_name"]
     return item
 
@@ -988,13 +994,13 @@ def entries():
     for field in ("category","processed","completed","starred","archived","group_name"):
         if request.args.get(field) not in (None,""): where.append(f"{field}=?"); values.append(request.args[field])
     view=request.args.get("view","")
-    if view=="active":where.append("completed=0 AND reminder_completed=0")
-    elif view=="handled":where.append("due_at IS NOT NULL AND reminder_completed=1")
-    elif view=="reminders":where.append("due_at IS NOT NULL AND reminder_completed=0")
+    if view=="active":where.append("completed=0")
+    elif view=="handled":where.append("due_at IS NOT NULL AND completed=1") # legacy client compatibility
+    elif view=="reminders":where.append("due_at IS NOT NULL AND completed=0")
     elif view=="today":
         local_tomorrow=datetime.now(REMINDER_ZONE).date()+timedelta(days=1)
         tomorrow=datetime(local_tomorrow.year,local_tomorrow.month,local_tomorrow.day,tzinfo=REMINDER_ZONE).astimezone(timezone.utc).isoformat()
-        where.append("due_at IS NOT NULL AND due_at<? AND reminder_completed=0");values.append(tomorrow)
+        where.append("due_at IS NOT NULL AND due_at<? AND completed=0");values.append(tomorrow)
     page=max(int(request.args.get("page",1)),1); limit=min(max(int(request.args.get("limit",50)),1),200); clause=" WHERE "+" AND ".join(where) if where else ""
     total=db().execute("SELECT count(*) FROM entries"+clause,values).fetchone()[0]
     order="due_at,created_at" if view in {"today","reminders"} else "created_at DESC"
@@ -1009,6 +1015,7 @@ def update_entry(entry_id):
     body=request.get_json(force=True)
     if "collection_name" in body and "group_name" not in body:body["group_name"]=body["collection_name"]
     allowed={"starred","processed","completed","archived","tags","transcription","title","category","group_name","due_at","reminder_completed","reminder_notify_before_minutes"}; updates={k:body[k] for k in body if k in allowed}
+    if "reminder_completed" in updates and "completed" not in updates:updates["completed"]=updates["reminder_completed"]
     if "category" in updates and updates["category"] not in VALID_CATEGORIES:return jsonify(error="Invalid category"),400
     if "group_name" in updates:
         requested=normalized_group_name(updates["group_name"]) if updates["group_name"] else None
@@ -1033,7 +1040,10 @@ def update_entry(entry_id):
                 lead=int(updates["reminder_notify_before_minutes"])
                 updates["reminder_notify_before_minutes"]=min(lead,10080) if lead>0 else None
             except (TypeError,ValueError):return jsonify(error="Invalid reminder lead time"),400
-    previous=db().execute("SELECT group_name,completed FROM entries WHERE id=?",(entry_id,)).fetchone(); values=[int(v) if k in {"starred","processed","completed","archived","reminder_completed","reminder_notify_before_minutes"} and v is not None else (None if v is None else str(v)) for k,v in updates.items()]
+    previous=db().execute("SELECT group_name,completed,due_at FROM entries WHERE id=?",(entry_id,)).fetchone()
+    if previous is None:return jsonify(error="Not found"),404
+    if "completed" in updates and (previous["due_at"] is not None or updates.get("due_at") is not None):updates["reminder_completed"]=updates["completed"]
+    values=[int(v) if k in {"starred","processed","completed","archived","reminder_completed","reminder_notify_before_minutes"} and v is not None else (None if v is None else str(v)) for k,v in updates.items()]
     cur=db().execute(f"UPDATE entries SET {', '.join(k+'=?' for k in updates)} WHERE id=?",(*values,entry_id)); db().commit()
     if cur.rowcount and "group_name" in updates and previous["group_name"]!=updates["group_name"]:log_activity("info","collection_changed",f"Moved item from {previous['group_name'] or 'standalone'} to {updates['group_name'] or 'standalone'}",entry_id)
     if cur.rowcount and "completed" in updates and previous["completed"]!=int(updates["completed"]):log_activity("info","item_completed" if updates["completed"] else "item_reopened","Completed item" if updates["completed"] else "Reopened item",entry_id)
@@ -1046,7 +1056,11 @@ def bulk():
     body=request.get_json(force=True); ids=[str(x) for x in body.get("ids",[])][:500]; action=body.get("action")
     mapping={"archive":("archived",1),"restore":("archived",0),"process":("processed",1),"unprocess":("processed",0),"complete":("completed",1),"reopen":("completed",0),"star":("starred",1),"unstar":("starred",0)}
     if not ids or action not in mapping:return jsonify(error="Invalid bulk request"),400
-    field,value=mapping[action]; marks=",".join("?"*len(ids)); cur=db().execute(f"UPDATE entries SET {field}=? WHERE id IN ({marks})",(value,*ids)); db().commit()
+    field,value=mapping[action]; marks=",".join("?"*len(ids))
+    assignment=f"{field}=?"
+    if action in {"complete","reopen"}:assignment+=", reminder_completed=CASE WHEN due_at IS NOT NULL THEN ? ELSE reminder_completed END"
+    parameters=(value,value,*ids) if action in {"complete","reopen"} else (value,*ids)
+    cur=db().execute(f"UPDATE entries SET {assignment} WHERE id IN ({marks})",parameters); db().commit()
     if action in {"complete","reopen"}:
         for entry_id in ids:log_activity("info","item_completed" if value else "item_reopened","Completed item" if value else "Reopened item",entry_id)
     return jsonify(ok=True,updated=cur.rowcount)

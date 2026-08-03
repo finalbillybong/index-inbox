@@ -4,6 +4,12 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class NotificationAndDownloadTest {
+    @Test fun serverEventsUseUnderstandableNotificationGroups() {
+        assertEquals("items",notificationPreferenceForEvent("capture_standalone"))
+        assertEquals("commands",notificationPreferenceForEvent("interpreted_operation"))
+        assertEquals("problems",notificationPreferenceForEvent("ingest_error"))
+        assertEquals(null,notificationPreferenceForEvent("item_deleted"))
+    }
     @Test fun ringOperationOutcomesUseClearNotificationTitles() {
         assertEquals("Ring command needs confirmation",ringOperationNotificationTitle("awaiting_confirmation"))
         assertEquals("Ring command needs review",ringOperationNotificationTitle("saved_plain_safely"))

@@ -140,12 +140,12 @@ object NotificationCenter {
         .build()
 
     suspend fun showEvent(context: Context, event: ChangeEvent) {
-        if(!AuthStore(context).notificationsEnabled)return
+        val auth=AuthStore(context)
+        if(!auth.notificationsEnabled||!shouldNotifyForEvent(auth,event.kind))return
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
         ensureChannels(context)
-        val auth=AuthStore(context)
         val quiet=auth.quietHoursEnabled&&isQuietHour(ZonedDateTime.now().hour,auth.quietHoursStart,auth.quietHoursEnd)
         val operationDetails=if(event.kind=="interpreted_operation") runCatching{Json.parseToJsonElement(event.details).jsonObject}.getOrNull() else null
         val operationOutcome=operationDetails?.get("outcome")?.jsonPrimitive?.contentOrNull
@@ -190,7 +190,7 @@ object NotificationCenter {
 
     fun showReminder(context:Context,entry:Entry,early:Boolean=false):Boolean {
         val auth=AuthStore(context)
-        if(!auth.notificationsEnabled)return false
+        if(!auth.notificationsEnabled||!auth.notifyReminders)return false
         if(Build.VERSION.SDK_INT>=33&&
             ContextCompat.checkSelfPermission(context,Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED
         )return false
@@ -252,6 +252,20 @@ object NotificationCenter {
 internal fun notificationChannelId(sound:Boolean,vibration:Boolean)=
     "index_inbox_activity_${if(sound)"sound" else "silent"}_${if(vibration)"vibrate" else "still"}"
 
+internal fun notificationPreferenceForEvent(kind:String)=when(kind) {
+    "capture_standalone","capture_grouped","group_created","group_exists","collection_changed" -> "items"
+    "interpreted_operation" -> "commands"
+    "webhook_rejected","ingest_error","group_unrecognized" -> "problems"
+    else -> null
+}
+
+internal fun shouldNotifyForEvent(auth:AuthStore,kind:String)=when(notificationPreferenceForEvent(kind)) {
+    "items" -> auth.notifyNewItems
+    "commands" -> auth.notifyCommandOutcomes
+    "problems" -> auth.notifyProblems
+    else -> false
+}
+
 internal fun isQuietHour(hour:Int,start:Int,end:Int)=when {
     start==end -> true
     start<end -> hour in start until end
@@ -292,11 +306,11 @@ class NotificationActionWorker(context:Context,params:WorkerParameters):Coroutin
                 NotificationCenter.ACTION_PROCESSED -> api.update(entryId,EntryUpdate(processed=true))
                 NotificationCenter.ACTION_DELETE -> api.delete(entryId)
                 NotificationCenter.ACTION_REMINDER_COMPLETE ->
-                    api.update(entryId,EntryUpdate(reminderCompleted=true))
+                    api.update(entryId,EntryUpdate(completed=true))
                 NotificationCenter.ACTION_REMINDER_SNOOZE ->
                     api.update(entryId,EntryUpdate(
                         dueAt=Instant.now().plusSeconds(600).toString(),
-                        reminderCompleted=false,
+                        completed=false,
                         reminderNotifyBeforeMinutes=0,
                     ))
                 else -> return Result.failure()
